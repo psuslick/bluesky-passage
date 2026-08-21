@@ -104,6 +104,12 @@ def main() -> int:
         )
     if manifest.get("domain") != "bluesky_passage":
         errors.append("manifest.json domain is not bluesky_passage")
+    manifest_keys = list(manifest)
+    expected_manifest_keys = ["domain", "name", *sorted(manifest_keys[2:])]
+    if manifest_keys != expected_manifest_keys:
+        errors.append(
+            "manifest.json keys must be domain, name, then alphabetical"
+        )
     if manifest.get("codeowners") != ["@psuslick"]:
         errors.append("manifest.json codeowners does not identify @psuslick")
     if hacs.get("name") != "BlueSky Passage":
@@ -158,6 +164,10 @@ def main() -> int:
         errors.append("Python integration compile failed")
     if not compileall.compile_dir(TOOLS, quiet=1):
         errors.append("Python tools compile failed")
+
+    init_text = (COMPONENT / "__init__.py").read_text(encoding="utf-8")
+    if "CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)" not in init_text:
+        errors.append("Config-entry-only integration is missing CONFIG_SCHEMA")
 
     javascript = COMPONENT / "frontend" / "bluesky-passage-panel.js"
     if shutil.which("node"):
