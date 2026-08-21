@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible BlueSky Passage problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post coordinates, messages, IMEI values, MapShare links, passwords, or database files. Sanitize logs before attaching them.
+  - type: input
+    id: version
+    attributes:
+      label: BlueSky Passage version
+      placeholder: 2.0.1
+    validations:
+      required: true
+  - type: input
+    id: home_assistant
+    attributes:
+      label: Home Assistant Core version
+      placeholder: 2026.7.4
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include exact steps and the expected result. Remove private voyage data.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics or errors
+      render: text

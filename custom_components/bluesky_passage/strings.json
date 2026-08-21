@@ -1,0 +1,53 @@
+{
+  "title": "BlueSky Passage",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Garmin MapShare",
+        "description": "Enter your public MapShare name or full share URL. The feed is checked before anything is saved. The optional PredictWind URL is stored only in Home Assistant.",
+        "data": {
+          "link_name": "MapShare name or URL",
+          "link_password": "MapShare password (leave blank if public)",
+          "predictwind_url": "Optional PredictWind tracking URL"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update MapShare password",
+        "description": "Garmin rejected the saved feed credentials.",
+        "data": {
+          "link_password": "MapShare password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach or parse the Garmin feed.",
+      "invalid_auth": "The MapShare password is missing or incorrect.",
+      "invalid_link": "The MapShare name did not return a feed.",
+      "predictwind_url_format": "Use a valid HTTPS PredictWind tracking URL, or leave it blank."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one BlueSky Passage feed is supported in this version.",
+      "already_configured": "This MapShare feed is already configured.",
+      "reauth_successful": "The MapShare credentials were updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BlueSky Passage options",
+        "description": "Persistent Home Assistant notifications are the recommended default. Mobile push is optional; enter the exact notify action only after testing it in Developer tools, for example notify.mobile_app_your_phone.",
+        "data": {
+          "stale_minutes": "Stale tracking threshold (minutes)",
+          "notifications_enabled": "Routine persistent notifications enabled",
+          "mobile_notify_service": "Optional mobile notify action",
+          "predictwind_url": "Optional PredictWind tracking URL",
+          "zone_notifications_enabled": "Notify on Home Assistant zone changes"
+        }
+      }
+    },
+    "error": {
+      "notify_service_format": "Use the exact form notify.mobile_app_name, or leave this blank.",
+      "predictwind_url_format": "Use a valid HTTPS PredictWind tracking URL, or leave it blank."
+    }
+  }
+}

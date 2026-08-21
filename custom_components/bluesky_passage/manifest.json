@@ -1,0 +1,14 @@
+{
+  "domain": "bluesky_passage",
+  "name": "BlueSky Passage",
+  "version": "2.0.1",
+  "codeowners": ["@psuslick"],
+  "config_flow": true,
+  "documentation": "https://github.com/psuslick/bluesky-passage",
+  "dependencies": ["frontend", "http", "panel_custom", "persistent_notification"],
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/psuslick/bluesky-passage/issues",
+  "requirements": [],
+  "single_config_entry": true
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="BlueSky Passage sailboat">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1976d2"/>
+      <stop offset="1" stop-color="#00acc1"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="120" fill="url(#sky)"/>
+  <path d="M128 39v119H74z" fill="#fff"/>
+  <path d="M137 54v104h52z" fill="#e3f2fd"/>
+  <path d="M54 166h148l-21 34H78z" fill="#fff"/>
+  <path d="M43 211c23-13 45-13 68 0s45 13 68 0 45-13 68 0" fill="none" stroke="#b2ebf2" stroke-width="12" stroke-linecap="round"/>
+</svg>
