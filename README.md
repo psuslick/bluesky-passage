@@ -250,6 +250,3 @@ python3 tools/validate_bundle.py
 The repository also runs Hassfest, HACS validation, and the bundled regression
 suite through GitHub Actions.
 
-## License
-
-MIT. See [LICENSE](LICENSE).
