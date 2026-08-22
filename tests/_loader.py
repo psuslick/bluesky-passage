@@ -35,3 +35,26 @@ parser = load("parser")
 database = load("database")
 exporting = load("exporting")
 migration = load("migration")
+garmin_dates = load("garmin_dates")
+routing = load("routing")
+
+# weather.py is mostly pure normalization logic but imports two Home Assistant
+# helpers for its runtime HTTP client. Tiny stand-ins keep regression tests
+# dependency-free without pretending to exercise Home Assistant itself.
+homeassistant = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+homeassistant_core = sys.modules.setdefault(
+    "homeassistant.core", types.ModuleType("homeassistant.core")
+)
+homeassistant_core.HomeAssistant = object
+homeassistant_helpers = sys.modules.setdefault(
+    "homeassistant.helpers", types.ModuleType("homeassistant.helpers")
+)
+homeassistant_httpx = sys.modules.setdefault(
+    "homeassistant.helpers.httpx_client",
+    types.ModuleType("homeassistant.helpers.httpx_client"),
+)
+homeassistant_httpx.get_async_client = lambda _hass: None
+httpx = sys.modules.setdefault("httpx", types.ModuleType("httpx"))
+httpx.HTTPError = type("HTTPError", (Exception,), {})
+httpx.HTTPStatusError = type("HTTPStatusError", (httpx.HTTPError,), {})
+weather = load("weather")

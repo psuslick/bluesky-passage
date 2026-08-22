@@ -5,10 +5,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
-from _loader import calculations, database, exporting, migration, parser
+from _loader import (
+    calculations,
+    database,
+    exporting,
+    garmin_dates,
+    migration,
+    parser,
+    routing,
+    weather,
+)
 
 
 KML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -75,6 +85,13 @@ class ParserTests(unittest.TestCase):
         self.assertAlmostEqual(5.0, records[0].sog_kn, places=2)
         self.assertAlmostEqual(3.048, records[0].elevation_m, places=3)
         self.assertEqual("All well", records[1].message_text)
+        self.assertEqual("2026-08-20T20:00:00Z", records[0].recorded_at_utc)
+
+    def test_malformed_or_untimestamped_kml_fails_closed(self):
+        with self.assertRaises(parser.KmlParseError):
+            parser.parse_kml("<kml><broken>")
+        with self.assertRaises(parser.KmlParseError):
+            parser.parse_kml("<kml><Document /></kml>")
 
     def test_predictwind_shape_normalizes(self):
         records = parser.records_from_mappings(
@@ -122,6 +139,83 @@ class CalculationTests(unittest.TestCase):
         self.assertAlmostEqual(0, value, places=5)
 
 
+class GarminDateTests(unittest.TestCase):
+    def test_bounded_parameters_are_utc_and_ordered(self):
+        result = garmin_dates.garmin_date_params(
+            "2026-08-01T00:00:00-04:00", "2026-08-08T04:00:00Z"
+        )
+        self.assertEqual("2026-08-01T04:00:00Z", result["d1"])
+        self.assertEqual("2026-08-08T04:00:00Z", result["d2"])
+
+    def test_reversed_bounds_are_rejected(self):
+        with self.assertRaises(ValueError):
+            garmin_dates.garmin_date_params(
+                "2026-08-02T00:00:00Z", "2026-08-01T00:00:00Z"
+            )
+
+
+class RoutingTests(unittest.TestCase):
+    def test_no_weather_is_explicit_great_circle_reference(self):
+        profile = routing.VesselProfile.from_mapping({})
+        routes = routing.candidate_routes((18.0, -62.0), (17.1, -61.8))
+        result = routing.score_routes(routes, profile, {}, "2026-08-20T20:00:00Z")
+        self.assertEqual("great_circle_reference", result["method"])
+        self.assertFalse(result["weather_used"])
+        self.assertEqual("direct", result["selected"]["key"])
+        self.assertIn("not a navigable route", result["disclaimer"])
+
+    def test_partial_profile_has_a_bounded_fallback_speed(self):
+        profile = routing.VesselProfile.from_mapping({"waterline_length_ft": 36})
+        self.assertGreater(profile.base_speed_kn, 3)
+        self.assertLess(profile.base_speed_kn, 12)
+        self.assertEqual("hull estimate", profile.completeness["speed_method"])
+
+
+class WeatherTests(unittest.TestCase):
+    def test_model_period_must_be_close_to_the_requested_time(self):
+        target = "2026-08-20T20:00:00Z"
+        near = {
+            "success": True,
+            "response": [{
+                "periods": [{
+                    "dateTimeISO": "2026-08-20T21:00:00Z",
+                    "windSpeedKTS": 12.0,
+                }]
+            }],
+        }
+        sample = weather.parse_xweather_sample(
+            latitude=18.0,
+            longitude=-61.0,
+            valid_at_utc=target,
+            conditions_payload=near,
+            maritime_payload=None,
+        )
+        self.assertTrue(sample.conditions_available)
+        self.assertEqual(12.0, sample.wind_speed_kn)
+        self.assertEqual("modeled", sample.quality_state)
+
+        far = {
+            "success": True,
+            "response": [{
+                "periods": [{
+                    "dateTimeISO": "2026-08-21T08:00:00Z",
+                    "windSpeedKTS": 99.0,
+                }]
+            }],
+        }
+        missing = weather.parse_xweather_sample(
+            latitude=18.0,
+            longitude=-61.0,
+            valid_at_utc=target,
+            conditions_payload=far,
+            maritime_payload=None,
+        )
+        self.assertFalse(missing.conditions_available)
+        self.assertIsNone(missing.wind_speed_kn)
+        self.assertEqual("unavailable", missing.quality_state)
+        self.assertTrue(missing.warnings)
+
+
 class ArchiveTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -136,6 +230,113 @@ class ArchiveTests(unittest.TestCase):
         self.archive.initialize()
         self.assertEqual("ok", self.archive.integrity_check())
 
+    def test_v2_archive_migrates_without_losing_rows_or_routes(self):
+        legacy_path = Path(self.temp.name) / "legacy.sqlite3"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_info VALUES('schema_version','1');
+                CREATE TABLE track_points (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    source_event_id TEXT,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    device_imei TEXT,
+                    device_name TEXT,
+                    device_type TEXT,
+                    recorded_at_utc TEXT NOT NULL,
+                    latitude REAL,
+                    longitude REAL,
+                    elevation_m REAL,
+                    sog_kn REAL,
+                    cog_true REAL,
+                    valid_gps_fix INTEGER,
+                    in_emergency INTEGER,
+                    event_text TEXT,
+                    message_text TEXT,
+                    spatial_ref TEXT,
+                    raw_json TEXT NOT NULL,
+                    quality_flags_json TEXT NOT NULL DEFAULT '[]',
+                    import_id INTEGER,
+                    ingested_at_utc TEXT NOT NULL
+                );
+                CREATE TABLE passages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('planned','active','arrived','completed')),
+                    started_at_utc TEXT,
+                    arrived_at_utc TEXT,
+                    ended_at_utc TEXT,
+                    start_point_id INTEGER,
+                    current_destination_version_id INTEGER,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX idx_one_open_passage
+                    ON passages((1)) WHERE status IN ('active','arrived');
+                CREATE TABLE route_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    passage_id INTEGER,
+                    label TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    imported_at_utc TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    route_json TEXT NOT NULL,
+                    UNIQUE(passage_id, content_sha256)
+                );
+                INSERT INTO track_points(
+                    source,source_event_id,dedupe_key,recorded_at_utc,
+                    latitude,longitude,sog_kn,valid_gps_fix,in_emergency,
+                    raw_json,quality_flags_json,ingested_at_utc
+                ) VALUES(
+                    'garmin_mapshare','legacy-1','legacy-dedupe',
+                    '2026-08-20T20:00:00Z',18.0,-61.0,5.0,1,0,
+                    '{}','[]','2026-08-20T20:01:00Z'
+                );
+                INSERT INTO passages(
+                    name,status,started_at_utc,start_point_id,created_at_utc,updated_at_utc
+                ) VALUES(
+                    'Legacy passage','active','2026-08-20T20:00:00Z',1,
+                    '2026-08-20T20:00:00Z','2026-08-20T20:00:00Z'
+                );
+                INSERT INTO route_versions(
+                    passage_id,label,source,imported_at_utc,content_sha256,route_json
+                ) VALUES(
+                    1,'Legacy route','gpx_import','2026-08-20T20:00:00Z',
+                    'legacy-route','[[-61.0,18.0],[-60.9,18.1]]'
+                );
+                """
+            )
+        migrated = database.SQLiteArchive(legacy_path)
+        migrated.initialize()
+        self.assertEqual(1, migrated.dashboard_state()["archive"]["total_points"])
+        self.assertEqual("planned", migrated.passage_detail(1)["status"])
+        self.assertEqual(2, len(migrated.current_route(1)["coordinates"]))
+        with sqlite3.connect(legacy_path) as connection:
+            self.assertEqual(
+                "2",
+                connection.execute(
+                    "SELECT value FROM schema_info WHERE key='schema_version'"
+                ).fetchone()[0],
+            )
+            passage_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(passages)")
+            }
+            route_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(route_versions)")
+            }
+            indexes = {
+                row[1] for row in connection.execute("PRAGMA index_list(passages)")
+            }
+        self.assertTrue(
+            {"notes", "departure_latitude", "departure_longitude"}
+            <= passage_columns
+        )
+        self.assertIn("summary_json", route_columns)
+        self.assertNotIn("idx_one_open_passage", indexes)
+        self.assertEqual("ok", migrated.integrity_check())
+
     def test_ingest_is_atomic_and_deduplicates(self):
         records = parser.parse_kml(KML)
         first = self.archive.ingest_records(records, "garmin_mapshare", live=True)
@@ -145,6 +346,17 @@ class ArchiveTests(unittest.TestCase):
         state = self.archive.dashboard_state()
         self.assertEqual(2, state["archive"]["total_points"])
         self.assertEqual("All well", state["latest_message"]["text"])
+
+    def test_delayed_report_is_kept_once_and_marked_out_of_order(self):
+        records = parser.parse_kml(KML)
+        self.archive.ingest_records([records[1]], "garmin_mapshare", live=True)
+        result = self.archive.ingest_records(
+            [records[0], records[1]], "garmin_mapshare", live=True
+        )
+        self.assertEqual(1, result["inserted"])
+        points = self.archive.query_points(source="garmin_mapshare")["points"]
+        self.assertEqual(2, len(points))
+        self.assertIn("out_of_order", points[0]["quality_flags"])
 
     def test_point_detail_stays_attached_to_its_record(self):
         self.archive.ingest_records(parser.parse_kml(KML), "garmin_mapshare")
@@ -172,10 +384,13 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual("garmin_mapshare", result["points"][0]["source"])
         self.assertEqual("canonical", result["points"][0]["display_track"])
 
-    def test_passage_arrival_does_not_auto_complete(self):
-        passage = self.archive.start_passage(
-            "Test passage",
-            started_at_utc="2026-08-20T19:00:00Z",
+    def test_passage_is_a_previewed_annotation_and_never_a_live_state(self):
+        self.archive.ingest_records(parser.parse_kml(KML), "garmin_mapshare")
+        preview = self.archive.preview_passage(
+            passage_id=None,
+            name="Test passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
             destination={
                 "name": "Test harbor",
                 "latitude": 18.01,
@@ -183,15 +398,329 @@ class ArchiveTests(unittest.TestCase):
                 "arrival_radius_nm": 0.2,
             },
         )
-        result = self.archive.ingest_records(
-            parser.parse_kml(KML), "garmin_mapshare", live=True
+        self.assertEqual(2, preview["report_count"])
+        passage = self.archive.save_passage(
+            passage_id=None,
+            preview_token=preview["preview_token"],
+            name="Test passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            destination={
+                "name": "Test harbor",
+                "latitude": 18.01,
+                "longitude": -60.99,
+                "arrival_radius_nm": 0.2,
+            },
         )
-        self.assertIsNotNone(result["arrived_passage"])
-        current = self.archive.dashboard_state()["passage"]
-        self.assertEqual("arrived", current["status"])
-        self.archive.end_passage(passage["id"], "2026-08-20T21:00:00Z")
+        self.assertEqual("planned", passage["status"])
+        self.assertEqual("open_ended", passage["range_mode"])
         self.assertIsNone(self.archive.dashboard_state()["passage"])
         self.assertEqual(2, self.archive.dashboard_state()["archive"]["total_points"])
+
+    def test_passage_save_rejects_changed_details_after_preview(self):
+        preview = self.archive.preview_passage(
+            passage_id=None,
+            name="Original",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+        )
+        with self.assertRaises(ValueError):
+            self.archive.save_passage(
+                passage_id=None,
+                preview_token=preview["preview_token"],
+                name="Changed",
+                start_utc="2026-08-20T19:00:00Z",
+                end_utc=None,
+            )
+
+    def test_passage_can_be_edited_after_creation_without_a_destination(self):
+        first_preview = self.archive.preview_passage(
+            passage_id=None,
+            name="Range",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+        )
+        created = self.archive.save_passage(
+            passage_id=None,
+            preview_token=first_preview["preview_token"],
+            name="Range",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+        )
+        edit_preview = self.archive.preview_passage(
+            passage_id=created["id"],
+            name="Renamed",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc="2026-08-20T22:00:00Z",
+        )
+        edited = self.archive.save_passage(
+            passage_id=created["id"],
+            preview_token=edit_preview["preview_token"],
+            name="Renamed",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc="2026-08-20T22:00:00Z",
+        )
+        self.assertEqual("completed", edited["status"])
+        self.assertEqual("specific_time", edited["range_mode"])
+
+    def test_route_context_becomes_stale_and_destination_can_be_cleared(self):
+        original_destination = {
+            "name": "Harbor A",
+            "latitude": 18.1,
+            "longitude": -60.9,
+            "arrival_radius_nm": 2.0,
+        }
+        preview = self.archive.preview_passage(
+            passage_id=None,
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=original_destination,
+        )
+        passage = self.archive.save_passage(
+            passage_id=None,
+            preview_token=preview["preview_token"],
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=original_destination,
+        )
+        self.archive.add_route_version(
+            passage["id"],
+            "Comparison",
+            "great_circle_reference",
+            "context-route",
+            [[-61.0, 18.0], [-60.9, 18.1]],
+            summary={"context_hash": database.route_context_hash(passage, None)},
+        )
+        self.assertEqual(
+            "current",
+            self.archive.passage_detail(passage["id"])["route"]["context_status"],
+        )
+
+        replacement = {
+            "name": "Harbor B",
+            "latitude": 18.2,
+            "longitude": -60.8,
+            "arrival_radius_nm": 2.0,
+        }
+        edit_preview = self.archive.preview_passage(
+            passage_id=passage["id"],
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=replacement,
+        )
+        self.archive.save_passage(
+            passage_id=passage["id"],
+            preview_token=edit_preview["preview_token"],
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=replacement,
+        )
+        self.assertEqual(
+            "stale",
+            self.archive.passage_detail(passage["id"])["route"]["context_status"],
+        )
+
+        clear_preview = self.archive.preview_passage(
+            passage_id=passage["id"],
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=None,
+            clear_destination=True,
+        )
+        self.assertEqual(2, clear_preview["destination_versions_removed"])
+        cleared = self.archive.save_passage(
+            passage_id=passage["id"],
+            preview_token=clear_preview["preview_token"],
+            name="Context passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_latitude=18.0,
+            departure_longitude=-61.0,
+            destination=None,
+            clear_destination=True,
+        )
+        self.assertIsNone(cleared["destination_name"])
+        self.assertEqual([], cleared["destination_versions"])
+
+    def test_backfill_job_is_chunked_resumable_and_preview_only(self):
+        job = self.archive.create_backfill_job(
+            phase="preview",
+            start_utc="2026-01-01T00:00:00Z",
+            end_utc="2026-01-20T00:00:00Z",
+            chunk_days=7,
+        )
+        self.assertEqual(3, job["chunks_total"])
+        first = self.archive.next_backfill_chunk(job["id"])
+        self.assertEqual(0, first["chunk_index"])
+        updated = self.archive.complete_backfill_chunk(
+            job["id"],
+            first["id"],
+            returned=10,
+            inserted=0,
+            duplicated=2,
+            rejected=0,
+            first_recorded_at_utc="2026-01-01T01:00:00Z",
+            last_recorded_at_utc="2026-01-07T23:00:00Z",
+        )
+        self.assertEqual(1, updated["chunks_completed"])
+        self.assertEqual("running", updated["status"])
+        second = self.archive.next_backfill_chunk(job["id"])
+        failed = self.archive.fail_backfill_chunk(
+            job["id"], second["id"], "temporary source failure"
+        )
+        self.assertEqual("failed", failed["status"])
+        resumed = self.archive.next_backfill_chunk(job["id"])
+        self.assertEqual(second["id"], resumed["id"])
+        self.assertEqual("running", resumed["status"])
+
+    def test_startup_closes_a_completed_backfill_import_after_power_loss(self):
+        preview = self.archive.create_backfill_job(
+            phase="preview",
+            start_utc="2026-01-01T00:00:00Z",
+            end_utc="2026-01-02T00:00:00Z",
+        )
+        preview_chunk = self.archive.next_backfill_chunk(preview["id"])
+        self.archive.complete_backfill_chunk(
+            preview["id"],
+            preview_chunk["id"],
+            returned=0,
+            inserted=0,
+            duplicated=0,
+            rejected=0,
+            first_recorded_at_utc=None,
+            last_recorded_at_utc=None,
+        )
+        import_id = self.archive.begin_import(
+            "garmin_mapshare", "Power-loss test", "b" * 64
+        )
+        commit = self.archive.create_backfill_job(
+            phase="commit",
+            start_utc="2026-01-01T00:00:00Z",
+            end_utc="2026-01-02T00:00:00Z",
+            preview_job_id=preview["id"],
+            import_id=import_id,
+        )
+        commit_chunk = self.archive.next_backfill_chunk(commit["id"])
+        self.archive.complete_backfill_chunk(
+            commit["id"],
+            commit_chunk["id"],
+            returned=0,
+            inserted=0,
+            duplicated=0,
+            rejected=0,
+            first_recorded_at_utc=None,
+            last_recorded_at_utc=None,
+        )
+        self.assertEqual("running", self.archive.list_imports()[0]["status"])
+        self.archive.initialize()
+        self.assertEqual("completed", self.archive.list_imports()[0]["status"])
+
+    def test_recorder_preview_is_non_mutating_and_explains_duplicates(self):
+        existing = parser.TrackRecord(
+            recorded_at_utc="2026-08-20T20:00:00Z",
+            latitude=18.0,
+            longitude=-61.0,
+            source_event_id="recorder-1",
+        )
+        unseen = parser.TrackRecord(
+            recorded_at_utc="2026-08-20T20:10:00Z",
+            latitude=18.01,
+            longitude=-60.99,
+            source_event_id="recorder-2",
+        )
+        self.archive.ingest_records([existing], "ha_recorder")
+        before = self.archive.dashboard_state()["archive"]["total_points"]
+        preview = self.archive.preview_records([existing, unseen], "ha_recorder")
+        after = self.archive.dashboard_state()["archive"]["total_points"]
+        self.assertEqual(1, preview["duplicated"])
+        self.assertEqual(1, preview["new"])
+        self.assertEqual(before, after)
+
+    def test_weather_cache_preserves_missing_values_as_null(self):
+        result = self.archive.save_weather_samples(
+            [{
+                "provider": "xweather",
+                "quality_state": "modeled",
+                "valid_at_utc": "2026-08-20T20:00:00Z",
+                "latitude": 18.0,
+                "longitude": -61.0,
+                "wind_speed_kn": 12.5,
+                "wave_height_m": None,
+                "conditions_available": True,
+                "maritime_available": False,
+                "warnings": ["Marine data unavailable"],
+            }]
+        )
+        self.assertEqual(1, result["stored"])
+        sample = self.archive.query_weather_samples()[0]
+        self.assertEqual(12.5, sample["wind_speed_kn"])
+        self.assertIsNone(sample["wave_height_m"])
+        self.assertFalse(sample["maritime_available"])
+
+    def test_weather_failure_gap_expires_but_historical_model_does_not(self):
+        target = "2025-08-20T20:00:00Z"
+        base = {
+            "provider": "xweather",
+            "valid_at_utc": target,
+            "latitude": 18.0,
+            "longitude": -61.0,
+            "conditions_available": False,
+            "maritime_available": False,
+        }
+        self.archive.save_weather_samples(
+            [{**base, "purpose": "track", "quality_state": "unavailable"}]
+        )
+        self.assertIsNotNone(
+            self.archive.cached_weather_sample(
+                latitude=18.0, longitude=-61.0, valid_at_utc=target
+            )
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE weather_samples SET requested_at_utc='2000-01-01T00:00:00Z'"
+            )
+        self.assertIsNone(
+            self.archive.cached_weather_sample(
+                latitude=18.0, longitude=-61.0, valid_at_utc=target
+            )
+        )
+
+        self.archive.save_weather_samples(
+            [{
+                **base,
+                "purpose": "route",
+                "route_candidate": "direct",
+                "quality_state": "modeled",
+                "wind_speed_kn": 12.0,
+                "conditions_available": True,
+            }]
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE weather_samples SET requested_at_utc='2000-01-01T00:00:00Z' "
+                "WHERE quality_state='modeled'"
+            )
+        self.assertEqual(
+            12.0,
+            self.archive.cached_weather_sample(
+                latitude=18.0, longitude=-61.0, valid_at_utc=target
+            )["wind_speed_kn"],
+        )
 
     def test_import_rollback_only_removes_that_batch(self):
         live = parser.parse_kml(KML)[:1]
@@ -215,6 +744,26 @@ class ArchiveTests(unittest.TestCase):
         for format_name, expected in (("csv", "recorded_at_utc"), ("geojson", "FeatureCollection"), ("gpx", "<trkpt")):
             _suffix, _mime, content = exporting.export_points(points, format_name)
             self.assertIn(expected, content)
+
+    def test_csv_keeps_modeled_values_distinct_from_observations(self):
+        self.archive.ingest_records(parser.parse_kml(KML), "garmin_mapshare")
+        points = self.archive.query_points()["points"]
+        weather = [{
+            "track_point_id": points[0]["id"],
+            "provider": "xweather",
+            "quality_state": "modeled",
+            "valid_at_utc": points[0]["recorded_at_utc"],
+            "requested_at_utc": "2026-08-22T00:00:00Z",
+            "wind_speed_kn": 12.5,
+            "wave_height_m": 1.2,
+            "warnings": [],
+        }]
+        _suffix, _mime, content = exporting.export_points(
+            points, "csv", weather_samples=weather
+        )
+        self.assertIn("model_provider", content)
+        self.assertIn("xweather,modeled", content)
+        self.assertIn("12.5", content)
 
 
 if __name__ == "__main__":

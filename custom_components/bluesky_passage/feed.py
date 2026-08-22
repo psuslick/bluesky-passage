@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -10,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import get_async_client
 
 from .const import GARMIN_FEED_URL
+from .garmin_dates import garmin_date_params
 from .parser import KmlParseError, TrackRecord, parse_kml
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,14 +55,32 @@ class GarminFeedClient:
         self._client = get_async_client(hass)
         self.link_name = normalize_link_name(link_name)
         self.link_password = link_password or None
+        self.last_request: dict[str, Any] = {}
 
-    async def async_fetch(self) -> list[TrackRecord]:
+    async def async_fetch(
+        self,
+        *,
+        start_utc: str | datetime | None = None,
+        end_utc: str | datetime | None = None,
+    ) -> list[TrackRecord]:
+        """Fetch the current feed or an explicitly bounded Garmin interval."""
         url = GARMIN_FEED_URL.format(self.link_name)
         auth = ("", self.link_password) if self.link_password else None
+        try:
+            params = garmin_date_params(start_utc, end_utc)
+        except (TypeError, ValueError) as err:
+            raise FeedConnectionError("The Garmin request interval is invalid") from err
+        self.last_request = {
+            "start_utc": params.get("d1"),
+            "end_utc": params.get("d2"),
+            "http_status": None,
+            "records_returned": 0,
+        }
         try:
             response = await self._client.get(
                 url,
                 auth=auth,
+                params=params,
                 follow_redirects=True,
                 timeout=60.0,
             )
@@ -81,5 +102,8 @@ class GarminFeedClient:
         # Never log feed bodies, coordinates, or messages.
         _LOGGER.debug(
             "Garmin MapShare poll succeeded with %d timestamped records", len(records)
+        )
+        self.last_request.update(
+            {"http_status": response.status_code, "records_returned": len(records)}
         )
         return records

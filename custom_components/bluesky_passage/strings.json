@@ -35,19 +35,24 @@
     "step": {
       "init": {
         "title": "BlueSky Passage options",
-        "description": "Persistent Home Assistant notifications are the recommended default. Mobile push is optional; enter the exact notify action only after testing it in Developer tools, for example notify.mobile_app_your_phone.",
+        "description": "Persistent Home Assistant notifications are the recommended default. Xweather is optional and is used only when you request weather analytics or a route comparison. Leave its secret blank to preserve an existing saved secret.",
         "data": {
           "stale_minutes": "Stale tracking threshold (minutes)",
           "notifications_enabled": "Routine persistent notifications enabled",
           "mobile_notify_service": "Optional mobile notify action",
           "predictwind_url": "Optional PredictWind tracking URL",
+          "xweather_client_id": "Optional Xweather client ID",
+          "xweather_client_secret": "Optional Xweather client secret (blank keeps saved value)",
+          "speed_unit": "Dashboard speed unit",
+          "height_unit": "Dashboard height unit",
           "zone_notifications_enabled": "Notify on Home Assistant zone changes"
         }
       }
     },
     "error": {
       "notify_service_format": "Use the exact form notify.mobile_app_name, or leave this blank.",
-      "predictwind_url_format": "Use a valid HTTPS PredictWind tracking URL, or leave it blank."
+      "predictwind_url_format": "Use a valid HTTPS PredictWind tracking URL, or leave it blank.",
+      "xweather_credentials_pair": "Enter both an Xweather client ID and secret. To remove Xweather, clear the client ID."
     }
   }
 }

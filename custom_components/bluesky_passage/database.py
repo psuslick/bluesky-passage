@@ -8,7 +8,8 @@ without an automatic purge.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -17,7 +18,7 @@ from typing import Any, Iterable
 from .calculations import destination_metrics, haversine_nm, parse_utc
 from .parser import TrackRecord, raw_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GAP_SECONDS = 90 * 60
 IMPOSSIBLE_SPEED_KN = 80.0
 
@@ -25,6 +26,23 @@ IMPOSSIBLE_SPEED_KN = 80.0
 def utc_now() -> str:
     """Return a normalized UTC timestamp."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def route_context_hash(
+    passage: dict[str, Any], profile_updated_at_utc: str | None
+) -> str:
+    """Fingerprint every saved input that can make a route comparison stale."""
+    context = {
+        "started_at_utc": passage.get("started_at_utc"),
+        "ended_at_utc": passage.get("ended_at_utc"),
+        "departure_latitude": passage.get("departure_latitude"),
+        "departure_longitude": passage.get("departure_longitude"),
+        "destination_version_id": passage.get("current_destination_version_id"),
+        "profile_updated_at_utc": profile_updated_at_utc,
+    }
+    return hashlib.sha256(
+        json.dumps(context, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -43,7 +61,25 @@ class SQLiteArchive:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA wal_autocheckpoint = 1000")
+        connection.execute("PRAGMA journal_size_limit = 8388608")
         return connection
+
+    @staticmethod
+    def _ensure_column(
+        connection: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        """Add one backward-compatible column when upgrading an archive."""
+        existing = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def initialize(self) -> None:
         """Create/migrate the archive and verify it opens cleanly."""
@@ -51,6 +87,8 @@ class SQLiteArchive:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA wal_autocheckpoint = 1000")
+            connection.execute("PRAGMA journal_size_limit = 8388608")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_info (
@@ -168,7 +206,123 @@ class SQLiteArchive:
 
                 CREATE INDEX IF NOT EXISTS idx_route_versions_passage
                     ON route_versions(passage_id, imported_at_utc);
+
+                CREATE TABLE IF NOT EXISTS weather_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sample_key TEXT NOT NULL UNIQUE,
+                    provider TEXT NOT NULL,
+                    purpose TEXT NOT NULL DEFAULT 'track',
+                    track_point_id INTEGER,
+                    passage_id INTEGER,
+                    route_candidate TEXT,
+                    quality_state TEXT NOT NULL,
+                    valid_at_utc TEXT NOT NULL,
+                    requested_at_utc TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    wind_speed_kn REAL,
+                    wind_gust_kn REAL,
+                    wind_dir_deg REAL,
+                    wave_height_m REAL,
+                    wave_dir_deg REAL,
+                    wave_period_s REAL,
+                    current_speed_kn REAL,
+                    current_dir_deg REAL,
+                    pressure_hpa REAL,
+                    sea_surface_temp_c REAL,
+                    conditions_available INTEGER NOT NULL DEFAULT 0,
+                    maritime_available INTEGER NOT NULL DEFAULT 0,
+                    warnings_json TEXT NOT NULL DEFAULT '[]'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_weather_samples_time
+                    ON weather_samples(valid_at_utc);
+                CREATE INDEX IF NOT EXISTS idx_weather_samples_provider_time
+                    ON weather_samples(provider, valid_at_utc);
+
+                CREATE TABLE IF NOT EXISTS vessel_profiles (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    profile_json TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS backfill_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phase TEXT NOT NULL CHECK(phase IN ('preview','commit')),
+                    start_utc TEXT NOT NULL,
+                    end_utc TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','cancelled')),
+                    preview_job_id INTEGER REFERENCES backfill_jobs(id),
+                    import_id INTEGER REFERENCES imports(id),
+                    chunks_total INTEGER NOT NULL DEFAULT 0,
+                    chunks_completed INTEGER NOT NULL DEFAULT 0,
+                    records_returned INTEGER NOT NULL DEFAULT 0,
+                    records_inserted INTEGER NOT NULL DEFAULT 0,
+                    records_duplicated INTEGER NOT NULL DEFAULT 0,
+                    records_rejected INTEGER NOT NULL DEFAULT 0,
+                    first_recorded_at_utc TEXT,
+                    last_recorded_at_utc TEXT,
+                    error TEXT,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS backfill_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL REFERENCES backfill_jobs(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    start_utc TEXT NOT NULL,
+                    end_utc TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed')),
+                    records_returned INTEGER NOT NULL DEFAULT 0,
+                    records_inserted INTEGER NOT NULL DEFAULT 0,
+                    records_duplicated INTEGER NOT NULL DEFAULT 0,
+                    records_rejected INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    UNIQUE(job_id, chunk_index)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_backfill_chunks_job_status
+                    ON backfill_chunks(job_id, status, chunk_index);
                 """
+            )
+            connection.execute("DROP INDEX IF EXISTS idx_one_open_passage")
+            self._ensure_column(connection, "passages", "notes", "TEXT")
+            self._ensure_column(connection, "passages", "departure_name", "TEXT")
+            self._ensure_column(connection, "passages", "departure_latitude", "REAL")
+            self._ensure_column(connection, "passages", "departure_longitude", "REAL")
+            self._ensure_column(
+                connection,
+                "route_versions",
+                "summary_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection, "route_versions", "departure_at_utc", "TEXT"
+            )
+            self._ensure_column(
+                connection, "route_versions", "weather_generated_at_utc", "TEXT"
+            )
+            self._ensure_column(
+                connection, "weather_samples", "purpose", "TEXT NOT NULL DEFAULT 'track'"
+            )
+            self._ensure_column(connection, "weather_samples", "track_point_id", "INTEGER")
+            self._ensure_column(connection, "weather_samples", "passage_id", "INTEGER")
+            self._ensure_column(connection, "weather_samples", "route_candidate", "TEXT")
+            # v2.1 models passages as editable temporal annotations. Preserve
+            # legacy rows and timestamps while retiring live operating states.
+            connection.execute(
+                "UPDATE passages SET status='planned' WHERE status IN ('active','arrived')"
+            )
+            # A power loss between completing the last committed backfill chunk
+            # and closing its import batch must not leave a permanent
+            # "running" batch. All imported rows are already transactional.
+            connection.execute(
+                "UPDATE imports SET status='completed',notes=COALESCE(notes,?) "
+                "WHERE status='running' AND id IN ("
+                "SELECT import_id FROM backfill_jobs "
+                "WHERE phase='commit' AND status='completed' AND import_id IS NOT NULL)",
+                ("Recovered completed backfill during archive startup",),
             )
             connection.execute(
                 "INSERT INTO schema_info(key, value) VALUES('schema_version', ?) "
@@ -230,7 +384,6 @@ class SQLiteArchive:
         """Insert unseen records atomically and return an ingestion summary."""
         ordered = sorted(records, key=lambda record: record.recorded_at_utc)
         inserted_ids: list[int] = []
-        arrived_passage: dict[str, Any] | None = None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if import_id is not None:
@@ -335,55 +488,17 @@ class SQLiteArchive:
                           AND latitude IS NOT NULL AND longitude IS NOT NULL
                         ORDER BY recorded_at_utc LIMIT 1
                     ), updated_at_utc=?
-                    WHERE status IN ('active','arrived') AND start_point_id IS NULL
+                    WHERE start_point_id IS NULL
                     """,
                     (ingested_at,),
                 )
-                arrived_passage = self._check_arrival(connection, ingested_at)
             connection.commit()
 
         return {
             "seen": len(ordered),
             "inserted": len(inserted_ids),
             "inserted_ids": inserted_ids,
-            "arrived_passage": arrived_passage,
         }
-
-    def _check_arrival(
-        self, connection: sqlite3.Connection, changed_at: str
-    ) -> dict[str, Any] | None:
-        passage = connection.execute(
-            """
-            SELECT p.id, p.name, dv.name AS destination_name, dv.latitude,
-                   dv.longitude, dv.arrival_radius_nm
-            FROM passages p
-            JOIN destination_versions dv ON dv.id=p.current_destination_version_id
-            WHERE p.status='active' LIMIT 1
-            """
-        ).fetchone()
-        point = connection.execute(
-            "SELECT latitude,longitude,recorded_at_utc FROM track_points "
-            "WHERE source='garmin_mapshare' AND latitude IS NOT NULL AND longitude IS NOT NULL "
-            "ORDER BY recorded_at_utc DESC LIMIT 1"
-        ).fetchone()
-        if not passage or not point:
-            return None
-        distance = haversine_nm(
-            float(point["latitude"]),
-            float(point["longitude"]),
-            float(passage["latitude"]),
-            float(passage["longitude"]),
-        )
-        if distance > float(passage["arrival_radius_nm"]):
-            return None
-        connection.execute(
-            "UPDATE passages SET status='arrived', arrived_at_utc=?, updated_at_utc=? WHERE id=?",
-            (point["recorded_at_utc"], changed_at, passage["id"]),
-        )
-        result = dict(passage)
-        result["range_nm"] = round(distance, 2)
-        result["arrived_at_utc"] = point["recorded_at_utc"]
-        return result
 
     def latest_point(self, source: str = "garmin_mapshare") -> dict[str, Any] | None:
         """Return the newest source point."""
@@ -394,6 +509,14 @@ class SQLiteArchive:
                 (source,),
             ).fetchone()
             return self._normalize_point(row)
+
+    def point_by_id(self, point_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            return self._normalize_point(
+                connection.execute(
+                    "SELECT * FROM track_points WHERE id=?", (point_id,)
+                ).fetchone()
+            )
 
     @staticmethod
     def _normalize_point(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -507,17 +630,78 @@ class SQLiteArchive:
 
     @staticmethod
     def _decimate(points: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        """Bound a display payload while preserving endpoints and local extrema.
+
+        Each interior bucket contributes the lowest and highest speed values
+        (falling back to its midpoint when speed is unavailable). This avoids
+        the misleading smoothing caused by selecting only evenly spaced rows.
+        """
         if len(points) <= limit:
             return points
         if limit <= 1:
             return [points[-1]]
-        indices = {
-            round(index * (len(points) - 1) / (limit - 1)) for index in range(limit)
+        if limit == 2:
+            return [points[0], points[-1]]
+        bucket_count = max(1, (limit - 2) // 2)
+        width = (len(points) - 2) / bucket_count
+        indices = {0, len(points) - 1}
+        for bucket in range(bucket_count):
+            start = 1 + int(bucket * width)
+            end = min(len(points) - 1, 1 + int((bucket + 1) * width))
+            candidates = list(range(start, max(start + 1, end)))
+            numeric = [
+                index
+                for index in candidates
+                if isinstance(points[index].get("sog_kn"), (int, float))
+            ]
+            if numeric:
+                indices.add(min(numeric, key=lambda index: points[index]["sog_kn"]))
+                indices.add(max(numeric, key=lambda index: points[index]["sog_kn"]))
+            elif candidates:
+                indices.add(candidates[len(candidates) // 2])
+        if len(indices) < limit:
+            remaining = [index for index in range(1, len(points) - 1) if index not in indices]
+            needed = limit - len(indices)
+            if remaining and needed:
+                indices.update(
+                    remaining[
+                        round(index * (len(remaining) - 1) / max(needed - 1, 1))
+                    ]
+                    for index in range(needed)
+                )
+        critical = {
+            index
+            for index, point in enumerate(points)
+            if index in {0, len(points) - 1}
+            or point.get("break_before")
+            or point.get("in_emergency") is True
+            or bool(
+                {"invalid_gps_fix", "impossible_jump"}
+                & set(point.get("quality_flags") or [])
+            )
         }
+        indices.update(critical)
+        if len(indices) > limit:
+            if len(critical) >= limit:
+                ordered = sorted(critical)
+                indices = {
+                    ordered[round(index * (len(ordered) - 1) / (limit - 1))]
+                    for index in range(limit)
+                }
+            else:
+                remaining = sorted(indices - critical)
+                needed = limit - len(critical)
+                selected = {
+                    remaining[
+                        round(index * (len(remaining) - 1) / max(needed - 1, 1))
+                    ]
+                    for index in range(needed)
+                } if remaining and needed else set()
+                indices = critical | selected
         return [points[index] for index in sorted(indices)]
 
     def dashboard_state(self) -> dict[str, Any]:
-        """Return lightweight state and current-passage metrics."""
+        """Return lightweight tracking state independent of passage metadata."""
         with self._connect() as connection:
             latest = self._normalize_point(
                 connection.execute(
@@ -549,46 +733,17 @@ class SQLiteArchive:
                     "FROM events WHERE kind='event' ORDER BY recorded_at_utc DESC,id DESC LIMIT 1"
                 ).fetchone()
             )
-            passage = _dict(
+            weather_count = int(
+                connection.execute("SELECT COUNT(*) FROM weather_samples").fetchone()[0]
+            )
+            profile_row = connection.execute(
+                "SELECT profile_json,updated_at_utc FROM vessel_profiles WHERE id=1"
+            ).fetchone()
+            backfill = _dict(
                 connection.execute(
-                    "SELECT * FROM passages WHERE status IN ('active','arrived') LIMIT 1"
+                    "SELECT * FROM backfill_jobs ORDER BY created_at_utc DESC,id DESC LIMIT 1"
                 ).fetchone()
             )
-            destination = None
-            start_point = None
-            passage_points: list[dict[str, Any]] = []
-            if passage:
-                if passage.get("start_point_id"):
-                    start_point = self._normalize_point(
-                        connection.execute(
-                            "SELECT * FROM track_points WHERE id=?",
-                            (passage["start_point_id"],),
-                        ).fetchone()
-                    )
-                destination = _dict(
-                    connection.execute(
-                        "SELECT * FROM destination_versions WHERE id=?",
-                        (passage["current_destination_version_id"],),
-                    ).fetchone()
-                ) if passage.get("current_destination_version_id") else None
-                passage_points = [
-                    self._normalize_point(row)
-                    for row in connection.execute(
-                        "SELECT * FROM track_points WHERE source='garmin_mapshare' "
-                        "AND recorded_at_utc>=? ORDER BY recorded_at_utc,id",
-                        (passage["started_at_utc"],),
-                    ).fetchall()
-                ]
-                passage_points = [point for point in passage_points if point is not None]
-            route = None
-            if passage:
-                route = _dict(
-                    connection.execute(
-                        "SELECT id,label,source,imported_at_utc FROM route_versions "
-                        "WHERE passage_id=? ORDER BY imported_at_utc DESC LIMIT 1",
-                        (passage["id"],),
-                    ).fetchone()
-                )
         file_bytes = sum(
             candidate.stat().st_size
             for candidate in (
@@ -611,11 +766,19 @@ class SQLiteArchive:
                 "schema_version": SCHEMA_VERSION,
                 "integrity": self._last_integrity,
             },
-            "passage": passage,
-            "start_point": start_point,
-            "destination": destination,
-            "route": route,
-            "metrics": destination_metrics(passage_points, destination),
+            # Retained as null compatibility keys for v2.0 entities. Passage
+            # analytics are requested explicitly by passage id in v2.1.
+            "passage": None,
+            "start_point": None,
+            "destination": None,
+            "route": None,
+            "metrics": destination_metrics([], None),
+            "weather": {"stored_samples": weather_count},
+            "vessel_profile": {
+                "configured": profile_row is not None,
+                "updated_at_utc": profile_row["updated_at_utc"] if profile_row else None,
+            },
+            "latest_backfill": backfill,
         }
 
     def integrity_check(self) -> str:
@@ -631,13 +794,126 @@ class SQLiteArchive:
                 """
                 SELECT p.*, dv.name AS destination_name, dv.latitude AS destination_latitude,
                        dv.longitude AS destination_longitude,
-                       dv.arrival_radius_nm AS arrival_radius_nm
+                       dv.arrival_radius_nm AS arrival_radius_nm,
+                       dv.effective_at_utc AS destination_effective_at_utc,
+                       (
+                         SELECT COUNT(*) FROM track_points tp
+                         WHERE tp.source='garmin_mapshare'
+                           AND tp.recorded_at_utc>=p.started_at_utc
+                           AND (p.ended_at_utc IS NULL OR tp.recorded_at_utc<=p.ended_at_utc)
+                       ) AS report_count
                 FROM passages p
                 LEFT JOIN destination_versions dv ON dv.id=p.current_destination_version_id
                 ORDER BY COALESCE(p.started_at_utc,p.created_at_utc) DESC
                 """
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            for passage in result:
+                passage["range_mode"] = (
+                    "specific_time" if passage.get("ended_at_utc") else "open_ended"
+                )
+            return result
+
+    def passage_detail(self, passage_id: int) -> dict[str, Any]:
+        """Return one passage, destination history, coverage, and latest route."""
+        passages = [item for item in self.list_passages() if item["id"] == passage_id]
+        if not passages:
+            raise ValueError("Passage not found")
+        passage = passages[0]
+        with self._connect() as connection:
+            passage["destination_versions"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM destination_versions WHERE passage_id=? "
+                    "ORDER BY effective_at_utc,id",
+                    (passage_id,),
+                ).fetchall()
+            ]
+            route = connection.execute(
+                "SELECT * FROM route_versions WHERE passage_id=? "
+                "ORDER BY imported_at_utc DESC,id DESC LIMIT 1",
+                (passage_id,),
+            ).fetchone()
+            passage["route"] = self._normalize_route(route)
+            profile_row = connection.execute(
+                "SELECT updated_at_utc FROM vessel_profiles WHERE id=1"
+            ).fetchone()
+        if passage["route"]:
+            stored_hash = passage["route"]["summary"].get("context_hash")
+            expected_hash = route_context_hash(
+                passage,
+                profile_row["updated_at_utc"] if profile_row else None,
+            )
+            if stored_hash is None:
+                passage["route"]["context_status"] = "unknown"
+                passage["route"]["context_warning"] = (
+                    "This comparison predates context validation; recalculate it "
+                    "before using it for analysis."
+                )
+            elif stored_hash != expected_hash:
+                passage["route"]["context_status"] = "stale"
+                passage["route"]["context_warning"] = (
+                    "The passage, destination, or vessel profile changed after this "
+                    "comparison was saved. Recalculate it to restore the map overlay."
+                )
+            else:
+                passage["route"]["context_status"] = "current"
+                passage["route"]["context_warning"] = None
+        passage["coverage"] = self.preview_passage(
+            passage_id=passage_id,
+            name=passage["name"],
+            start_utc=passage["started_at_utc"],
+            end_utc=passage.get("ended_at_utc"),
+            departure_name=passage.get("departure_name"),
+            departure_latitude=passage.get("departure_latitude"),
+            departure_longitude=passage.get("departure_longitude"),
+            notes=passage.get("notes"),
+            destination={
+                "name": passage.get("destination_name"),
+                "latitude": passage.get("destination_latitude"),
+                "longitude": passage.get("destination_longitude"),
+                "arrival_radius_nm": passage.get("arrival_radius_nm"),
+                "effective_at_utc": passage.get("destination_effective_at_utc"),
+            }
+            if passage.get("destination_name")
+            else None,
+        )
+        return passage
+
+    @staticmethod
+    def _normalize_route(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        route = dict(row)
+        route["coordinates"] = json.loads(route.pop("route_json") or "[]")
+        route["summary"] = json.loads(route.pop("summary_json", "{}") or "{}")
+        return route
+
+    def passage_points_and_metrics(
+        self, passage_id: int, *, max_points: int = 4000
+    ) -> dict[str, Any]:
+        """Return one passage's archive slice and contextual metrics."""
+        detail = self.passage_detail(passage_id)
+        result = self.query_points(
+            start_utc=detail["started_at_utc"],
+            end_utc=detail.get("ended_at_utc"),
+            source="garmin_mapshare",
+            max_points=max_points,
+        )
+        destination = (
+            {
+                "name": detail.get("destination_name"),
+                "latitude": detail.get("destination_latitude"),
+                "longitude": detail.get("destination_longitude"),
+                "arrival_radius_nm": detail.get("arrival_radius_nm"),
+            }
+            if detail.get("destination_name")
+            else None
+        )
+        result["passage"] = detail
+        result["destination"] = destination
+        result["metrics"] = destination_metrics(result["points"], destination)
+        return result
 
     def list_destinations(self) -> list[dict[str, Any]]:
         """Return saved destination entries, newest first."""
@@ -692,120 +968,297 @@ class SQLiteArchive:
         )
         return int(cursor.lastrowid)
 
-    def start_passage(
+    @staticmethod
+    def _passage_preview_token(payload: dict[str, Any]) -> str:
+        normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(normalized.encode()).hexdigest()
+
+    def preview_passage(
         self,
-        name: str,
         *,
-        started_at_utc: str | None = None,
+        passage_id: int | None,
+        name: str,
+        start_utc: str,
+        end_utc: str | None,
+        departure_name: str | None = None,
+        departure_latitude: float | None = None,
+        departure_longitude: float | None = None,
+        notes: str | None = None,
         destination: dict[str, Any] | None = None,
+        clear_destination: bool = False,
     ) -> dict[str, Any]:
+        """Preview retroactive effects without changing archive metadata."""
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("Passage name is required")
+        start = parse_utc(start_utc).isoformat().replace("+00:00", "Z")
+        end = (
+            parse_utc(end_utc).isoformat().replace("+00:00", "Z")
+            if end_utc
+            else None
+        )
+        if end and end <= start:
+            raise ValueError("Passage end must be after its start")
+        if (departure_latitude is None) != (departure_longitude is None):
+            raise ValueError("Departure latitude and longitude must be entered together")
+        if departure_latitude is not None and departure_longitude is not None:
+            self._validate_coordinates(
+                float(departure_latitude), float(departure_longitude)
+            )
+        normalized_destination: dict[str, Any] | None = None
+        if destination:
+            destination_name = str(destination.get("name") or "").strip()
+            latitude = destination.get("latitude")
+            longitude = destination.get("longitude")
+            if not destination_name or latitude is None or longitude is None:
+                raise ValueError("Destination name, latitude, and longitude are required together")
+            self._validate_coordinates(float(latitude), float(longitude))
+            radius = float(destination.get("arrival_radius_nm", 2.0))
+            if not 0.1 <= radius <= 100:
+                raise ValueError("Arrival radius must be between 0.1 and 100 nautical miles")
+            effective = parse_utc(
+                destination.get("effective_at_utc") or start
+            ).isoformat().replace("+00:00", "Z")
+            if effective < start or (end and effective > end):
+                raise ValueError(
+                    "Destination effective time must fall within the passage range"
+                )
+            normalized_destination = {
+                "name": destination_name,
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "arrival_radius_nm": radius,
+                "effective_at_utc": effective,
+                "notes": str(destination.get("notes") or "").strip() or None,
+            }
+        payload = {
+            "passage_id": int(passage_id) if passage_id is not None else None,
+            "name": cleaned_name,
+            "start_utc": start,
+            "end_utc": end,
+            "departure_name": str(departure_name or "").strip() or None,
+            "departure_latitude": float(departure_latitude)
+            if departure_latitude is not None
+            else None,
+            "departure_longitude": float(departure_longitude)
+            if departure_longitude is not None
+            else None,
+            "notes": str(notes or "").strip() or None,
+            "destination": normalized_destination,
+            "clear_destination": bool(clear_destination),
+        }
+        clauses = ["source='garmin_mapshare'", "recorded_at_utc>=?"]
+        parameters: list[Any] = [start]
+        if end:
+            clauses.append("recorded_at_utc<=?")
+            parameters.append(end)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id,recorded_at_utc,latitude,longitude FROM track_points WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY recorded_at_utc,id",
+                parameters,
+            ).fetchall()
+            conflicts = connection.execute(
+                """
+                SELECT id,name,started_at_utc,ended_at_utc FROM passages
+                WHERE (? IS NULL OR id<>?)
+                  AND COALESCE(ended_at_utc,'9999-12-31T23:59:59Z')>=?
+                  AND COALESCE(?, '9999-12-31T23:59:59Z')>=started_at_utc
+                ORDER BY started_at_utc
+                """,
+                (passage_id, passage_id, start, end),
+            ).fetchall()
+            destination_versions_removed = (
+                int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM destination_versions WHERE passage_id=?",
+                        (passage_id,),
+                    ).fetchone()[0]
+                )
+                if clear_destination and passage_id is not None
+                else 0
+            )
+        gaps: list[dict[str, Any]] = []
+        for previous, current in zip(rows, rows[1:]):
+            seconds = (
+                parse_utc(current["recorded_at_utc"])
+                - parse_utc(previous["recorded_at_utc"])
+            ).total_seconds()
+            if seconds > GAP_SECONDS:
+                gaps.append(
+                    {
+                        "start_utc": previous["recorded_at_utc"],
+                        "end_utc": current["recorded_at_utc"],
+                        "minutes": round(seconds / 60, 1),
+                    }
+                )
+        return {
+            "normalized": payload,
+            "preview_token": self._passage_preview_token(payload),
+            "report_count": len(rows),
+            "first_report_utc": rows[0]["recorded_at_utc"] if rows else None,
+            "last_report_utc": rows[-1]["recorded_at_utc"] if rows else None,
+            "gap_count": len(gaps),
+            "gaps": gaps[:25],
+            "conflicts": [dict(row) for row in conflicts],
+            "destination_versions_removed": destination_versions_removed,
+            "raw_reports_unchanged": True,
+        }
+
+    def save_passage(
+        self,
+        *,
+        passage_id: int | None,
+        preview_token: str,
+        name: str,
+        start_utc: str,
+        end_utc: str | None,
+        departure_name: str | None = None,
+        departure_latitude: float | None = None,
+        departure_longitude: float | None = None,
+        notes: str | None = None,
+        destination: dict[str, Any] | None = None,
+        clear_destination: bool = False,
+    ) -> dict[str, Any]:
+        """Create or edit a temporal annotation after an exact preview."""
+        preview = self.preview_passage(
+            passage_id=passage_id,
+            name=name,
+            start_utc=start_utc,
+            end_utc=end_utc,
+            departure_name=departure_name,
+            departure_latitude=departure_latitude,
+            departure_longitude=departure_longitude,
+            notes=notes,
+            destination=destination,
+            clear_destination=clear_destination,
+        )
+        if preview_token != preview["preview_token"]:
+            raise ValueError("Passage details changed; preview the archive coverage again")
+        value = preview["normalized"]
         changed_at = utc_now()
-        started_at = started_at_utc or changed_at
-        parse_utc(started_at)
+        status = "completed" if value["end_utc"] else "planned"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute(
-                "SELECT 1 FROM passages WHERE status IN ('active','arrived') LIMIT 1"
-            ).fetchone():
-                raise ValueError("End the current passage before starting another")
-            cursor = connection.execute(
-                "INSERT INTO passages(name,status,started_at_utc,created_at_utc,updated_at_utc) "
-                "VALUES(?,'active',?,?,?)",
-                (name.strip(), started_at, changed_at, changed_at),
-            )
-            passage_id = int(cursor.lastrowid)
-            if destination:
-                version_id = self._add_destination_version(
-                    connection,
-                    passage_id,
-                    str(destination["name"]).strip(),
-                    float(destination["latitude"]),
-                    float(destination["longitude"]),
-                    float(destination.get("arrival_radius_nm", 2.0)),
-                    changed_at,
-                    destination.get("notes"),
+            if passage_id is None:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO passages(
+                        name,status,started_at_utc,ended_at_utc,departure_name,
+                        departure_latitude,departure_longitude,notes,
+                        created_at_utc,updated_at_utc
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        value["name"],
+                        status,
+                        value["start_utc"],
+                        value["end_utc"],
+                        value["departure_name"],
+                        value["departure_latitude"],
+                        value["departure_longitude"],
+                        value["notes"],
+                        changed_at,
+                        changed_at,
+                    ),
+                )
+                passage_id = int(cursor.lastrowid)
+                existing_destination = None
+            else:
+                existing_destination = connection.execute(
+                    "SELECT dv.* FROM passages p LEFT JOIN destination_versions dv "
+                    "ON dv.id=p.current_destination_version_id WHERE p.id=?",
+                    (passage_id,),
+                ).fetchone()
+                cursor = connection.execute(
+                    """
+                    UPDATE passages SET name=?,status=?,started_at_utc=?,ended_at_utc=?,
+                        arrived_at_utc=NULL,departure_name=?,departure_latitude=?,
+                        departure_longitude=?,notes=?,updated_at_utc=? WHERE id=?
+                    """,
+                    (
+                        value["name"],
+                        status,
+                        value["start_utc"],
+                        value["end_utc"],
+                        value["departure_name"],
+                        value["departure_latitude"],
+                        value["departure_longitude"],
+                        value["notes"],
+                        changed_at,
+                        passage_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("Passage not found")
+            if clear_destination:
+                connection.execute(
+                    "UPDATE passages SET current_destination_version_id=NULL WHERE id=?",
+                    (passage_id,),
                 )
                 connection.execute(
-                    "UPDATE passages SET current_destination_version_id=? WHERE id=?",
-                    (version_id, passage_id),
+                    "DELETE FROM destination_versions WHERE passage_id=?",
+                    (passage_id,),
                 )
+            elif value["destination"]:
+                target = value["destination"]
+                has_existing_destination = bool(
+                    existing_destination is not None
+                    and existing_destination["id"] is not None
+                )
+                comparable = (
+                    str(existing_destination["name"]),
+                    float(existing_destination["latitude"]),
+                    float(existing_destination["longitude"]),
+                    float(existing_destination["arrival_radius_nm"]),
+                    str(existing_destination["effective_at_utc"]),
+                    existing_destination["notes"],
+                ) if has_existing_destination else None
+                proposed = (
+                    target["name"],
+                    target["latitude"],
+                    target["longitude"],
+                    target["arrival_radius_nm"],
+                    target["effective_at_utc"],
+                    target["notes"],
+                )
+                if comparable != proposed:
+                    version_id = self._add_destination_version(
+                        connection,
+                        passage_id,
+                        target["name"],
+                        target["latitude"],
+                        target["longitude"],
+                        target["arrival_radius_nm"],
+                        target["effective_at_utc"],
+                        target["notes"],
+                    )
+                    connection.execute(
+                        "UPDATE passages SET current_destination_version_id=? WHERE id=?",
+                        (version_id, passage_id),
+                    )
             connection.execute(
                 """
                 UPDATE passages SET start_point_id=(
                     SELECT id FROM track_points
                     WHERE source='garmin_mapshare' AND recorded_at_utc>=?
+                      AND (? IS NULL OR recorded_at_utc<=?)
                       AND latitude IS NOT NULL AND longitude IS NOT NULL
                     ORDER BY recorded_at_utc,id LIMIT 1
                 ) WHERE id=?
                 """,
-                (started_at, passage_id),
+                (value["start_utc"], value["end_utc"], value["end_utc"], passage_id),
             )
             connection.commit()
-        return next(item for item in self.list_passages() if item["id"] == passage_id)
-
-    def set_destination(
-        self,
-        passage_id: int,
-        *,
-        name: str,
-        latitude: float,
-        longitude: float,
-        arrival_radius_nm: float,
-        notes: str | None = None,
-    ) -> dict[str, Any]:
-        if not 0.1 <= arrival_radius_nm <= 100:
-            raise ValueError("Arrival radius must be between 0.1 and 100 nautical miles")
-        changed_at = utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            passage = connection.execute(
-                "SELECT id FROM passages WHERE id=? AND status IN ('active','arrived')",
-                (passage_id,),
-            ).fetchone()
-            if not passage:
-                raise ValueError("The passage is not active")
-            version_id = self._add_destination_version(
-                connection,
-                passage_id,
-                name.strip(),
-                latitude,
-                longitude,
-                arrival_radius_nm,
-                changed_at,
-                notes,
-            )
-            connection.execute(
-                "UPDATE passages SET current_destination_version_id=?, status='active', "
-                "arrived_at_utc=NULL, updated_at_utc=? WHERE id=?",
-                (version_id, changed_at, passage_id),
-            )
-            connection.commit()
-        return next(item for item in self.list_passages() if item["id"] == passage_id)
-
-    def end_passage(self, passage_id: int, ended_at_utc: str | None = None) -> dict[str, Any]:
-        ended_at = ended_at_utc or utc_now()
-        parse_utc(ended_at)
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE passages SET status='completed',ended_at_utc=?,updated_at_utc=? "
-                "WHERE id=? AND status IN ('active','arrived')",
-                (ended_at, utc_now(), passage_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("The passage is not active")
-        return next(item for item in self.list_passages() if item["id"] == passage_id)
+        return self.passage_detail(int(passage_id))
 
     def delete_passage(self, passage_id: int) -> None:
         """Delete passage metadata without deleting global track records."""
         with self._connect() as connection:
-            status = connection.execute(
-                "SELECT status FROM passages WHERE id=?", (passage_id,)
-            ).fetchone()
-            if not status:
+            cursor = connection.execute("DELETE FROM passages WHERE id=?", (passage_id,))
+            if cursor.rowcount != 1:
                 raise ValueError("Passage not found")
-            if status["status"] in {"active", "arrived"}:
-                raise ValueError("End the passage before deleting it")
-            connection.execute("DELETE FROM passages WHERE id=?", (passage_id,))
 
     def begin_import(self, source: str, filename: str, content_sha256: str) -> int:
         now = utc_now()
@@ -868,6 +1321,459 @@ class SQLiteArchive:
                 ).fetchall()
             ]
 
+    def preview_records(
+        self, records: Iterable[TrackRecord], source: str
+    ) -> dict[str, Any]:
+        """Count new and duplicate source records without writing them."""
+        items = list(records)
+        keys = [record.dedupe_key(source) for record in items]
+        existing: set[str] = set()
+        with self._connect() as connection:
+            for start in range(0, len(keys), 500):
+                batch = keys[start : start + 500]
+                if not batch:
+                    continue
+                placeholders = ",".join("?" for _ in batch)
+                existing.update(
+                    row[0]
+                    for row in connection.execute(
+                        f"SELECT dedupe_key FROM track_points WHERE dedupe_key IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                )
+        timestamps = sorted(record.recorded_at_utc for record in items)
+        return {
+            "returned": len(items),
+            "new": sum(key not in existing for key in keys),
+            "duplicated": sum(key in existing for key in keys),
+            "first_recorded_at_utc": timestamps[0] if timestamps else None,
+            "last_recorded_at_utc": timestamps[-1] if timestamps else None,
+        }
+
+    def create_backfill_job(
+        self,
+        *,
+        phase: str,
+        start_utc: str,
+        end_utc: str,
+        chunk_days: int = 7,
+        preview_job_id: int | None = None,
+        import_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist a resumable, bounded Garmin backfill job."""
+        if phase not in {"preview", "commit"}:
+            raise ValueError("Backfill phase must be preview or commit")
+        start = parse_utc(start_utc)
+        end = parse_utc(end_utc)
+        if end <= start:
+            raise ValueError("Backfill end must be after its start")
+        if end - start > timedelta(days=3650):
+            raise ValueError("One backfill job is limited to ten years")
+        if not 1 <= int(chunk_days) <= 31:
+            raise ValueError("Backfill chunks must be between 1 and 31 days")
+        normalized_start = start.isoformat().replace("+00:00", "Z")
+        normalized_end = end.isoformat().replace("+00:00", "Z")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if phase == "commit":
+                preview = connection.execute(
+                    "SELECT * FROM backfill_jobs WHERE id=? AND phase='preview' "
+                    "AND status='completed'",
+                    (preview_job_id,),
+                ).fetchone()
+                if not preview:
+                    raise ValueError("Complete a matching preview before importing")
+                if (
+                    preview["start_utc"] != normalized_start
+                    or preview["end_utc"] != normalized_end
+                ):
+                    raise ValueError("Backfill dates changed; run preview again")
+                if import_id is None:
+                    raise ValueError("Commit backfill needs an import batch")
+            cursor = connection.execute(
+                """
+                INSERT INTO backfill_jobs(
+                    phase,start_utc,end_utc,status,preview_job_id,import_id,
+                    created_at_utc,updated_at_utc
+                ) VALUES(?,?,?,'pending',?,?,?,?)
+                """,
+                (
+                    phase,
+                    normalized_start,
+                    normalized_end,
+                    preview_job_id,
+                    import_id,
+                    now,
+                    now,
+                ),
+            )
+            job_id = int(cursor.lastrowid)
+            cursor_time = start
+            chunk_index = 0
+            delta = timedelta(days=int(chunk_days))
+            while cursor_time < end:
+                chunk_end = min(end, cursor_time + delta)
+                connection.execute(
+                    "INSERT INTO backfill_chunks(job_id,chunk_index,start_utc,end_utc,status) "
+                    "VALUES(?,?,?,?,'pending')",
+                    (
+                        job_id,
+                        chunk_index,
+                        cursor_time.isoformat().replace("+00:00", "Z"),
+                        chunk_end.isoformat().replace("+00:00", "Z"),
+                    ),
+                )
+                cursor_time = chunk_end
+                chunk_index += 1
+            connection.execute(
+                "UPDATE backfill_jobs SET chunks_total=? WHERE id=?",
+                (chunk_index, job_id),
+            )
+            connection.commit()
+        return self.get_backfill_job(job_id)
+
+    def get_backfill_job(self, job_id: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            job = _dict(
+                connection.execute(
+                    "SELECT * FROM backfill_jobs WHERE id=?", (job_id,)
+                ).fetchone()
+            )
+            if not job:
+                raise ValueError("Backfill job not found")
+            job["chunks"] = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM backfill_chunks WHERE job_id=? ORDER BY chunk_index",
+                    (job_id,),
+                ).fetchall()
+            ]
+            return job
+
+    def list_backfill_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM backfill_jobs ORDER BY created_at_utc DESC,id DESC LIMIT ?",
+                    (max(1, min(int(limit), 100)),),
+                ).fetchall()
+            ]
+
+    def next_backfill_chunk(self, job_id: int) -> dict[str, Any] | None:
+        """Claim the next chunk, resetting one interrupted running chunk."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT status FROM backfill_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not job:
+                raise ValueError("Backfill job not found")
+            if job["status"] in {"completed", "cancelled"}:
+                return None
+            connection.execute(
+                "UPDATE backfill_chunks SET status='pending' "
+                "WHERE job_id=? AND status='running'",
+                (job_id,),
+            )
+            row = connection.execute(
+                "SELECT * FROM backfill_chunks WHERE job_id=? AND status IN ('pending','failed') "
+                "ORDER BY chunk_index LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "UPDATE backfill_jobs SET status='completed',updated_at_utc=? WHERE id=?",
+                    (utc_now(), job_id),
+                )
+                connection.commit()
+                return None
+            connection.execute(
+                "UPDATE backfill_chunks SET status='running',error=NULL WHERE id=?",
+                (row["id"],),
+            )
+            connection.execute(
+                "UPDATE backfill_jobs SET status='running',error=NULL,updated_at_utc=? WHERE id=?",
+                (utc_now(), job_id),
+            )
+            connection.commit()
+            result = dict(row)
+            result["status"] = "running"
+            return result
+
+    def complete_backfill_chunk(
+        self,
+        job_id: int,
+        chunk_id: int,
+        *,
+        returned: int,
+        inserted: int,
+        duplicated: int,
+        rejected: int,
+        first_recorded_at_utc: str | None,
+        last_recorded_at_utc: str | None,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE backfill_chunks SET status='completed',records_returned=?,
+                    records_inserted=?,records_duplicated=?,records_rejected=?,error=NULL
+                WHERE id=? AND job_id=? AND status='running'
+                """,
+                (returned, inserted, duplicated, rejected, chunk_id, job_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Backfill chunk is not running")
+            remaining = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM backfill_chunks WHERE job_id=? AND status!='completed'",
+                    (job_id,),
+                ).fetchone()[0]
+            )
+            status = "completed" if remaining == 0 else "running"
+            connection.execute(
+                """
+                UPDATE backfill_jobs SET status=?,chunks_completed=chunks_completed+1,
+                    records_returned=records_returned+?,records_inserted=records_inserted+?,
+                    records_duplicated=records_duplicated+?,records_rejected=records_rejected+?,
+                    first_recorded_at_utc=CASE
+                        WHEN first_recorded_at_utc IS NULL THEN ?
+                        WHEN ? IS NULL THEN first_recorded_at_utc
+                        ELSE MIN(first_recorded_at_utc,?) END,
+                    last_recorded_at_utc=CASE
+                        WHEN last_recorded_at_utc IS NULL THEN ?
+                        WHEN ? IS NULL THEN last_recorded_at_utc
+                        ELSE MAX(last_recorded_at_utc,?) END,
+                    updated_at_utc=? WHERE id=?
+                """,
+                (
+                    status,
+                    returned,
+                    inserted,
+                    duplicated,
+                    rejected,
+                    first_recorded_at_utc,
+                    first_recorded_at_utc,
+                    first_recorded_at_utc,
+                    last_recorded_at_utc,
+                    last_recorded_at_utc,
+                    last_recorded_at_utc,
+                    utc_now(),
+                    job_id,
+                ),
+            )
+            connection.commit()
+        return self.get_backfill_job(job_id)
+
+    def fail_backfill_chunk(self, job_id: int, chunk_id: int, error: str) -> dict[str, Any]:
+        message = str(error)[:1000]
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE backfill_chunks SET status='failed',error=? WHERE id=? AND job_id=?",
+                (message, chunk_id, job_id),
+            )
+            connection.execute(
+                "UPDATE backfill_jobs SET status='failed',error=?,updated_at_utc=? WHERE id=?",
+                (message, utc_now(), job_id),
+            )
+        return self.get_backfill_job(job_id)
+
+    def cancel_backfill_job(self, job_id: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            job = connection.execute(
+                "SELECT import_id FROM backfill_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            cursor = connection.execute(
+                "UPDATE backfill_jobs SET status='cancelled',updated_at_utc=? "
+                "WHERE id=? AND status NOT IN ('completed','cancelled')",
+                (utc_now(), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Backfill job is already finished or was not found")
+            if job and job["import_id"] is not None:
+                connection.execute(
+                    "UPDATE imports SET status='failed',notes=? "
+                    "WHERE id=? AND status='running'",
+                    ("Backfill cancelled; inserted rows remain rollbackable", job["import_id"]),
+                )
+        return self.get_backfill_job(job_id)
+
+    @staticmethod
+    def _weather_key(sample: dict[str, Any]) -> str:
+        value = "|".join(
+            (
+                str(sample.get("provider") or "unknown"),
+                str(sample.get("purpose") or "track"),
+                str(sample.get("track_point_id") or ""),
+                str(sample.get("passage_id") or ""),
+                str(sample.get("route_candidate") or ""),
+                str(sample["valid_at_utc"]),
+                f"{float(sample['latitude']):.4f}",
+                f"{float(sample['longitude']):.4f}",
+            )
+        )
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    def save_weather_samples(self, samples: Iterable[dict[str, Any]]) -> dict[str, int]:
+        items = list(samples)
+        inserted = 0
+        requested = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for sample in items:
+                cursor = connection.execute(
+                    """
+                    INSERT OR REPLACE INTO weather_samples(
+                        sample_key,provider,purpose,track_point_id,passage_id,
+                        route_candidate,quality_state,valid_at_utc,requested_at_utc,
+                        latitude,longitude,wind_speed_kn,wind_gust_kn,wind_dir_deg,
+                        wave_height_m,wave_dir_deg,wave_period_s,current_speed_kn,
+                        current_dir_deg,pressure_hpa,sea_surface_temp_c,
+                        conditions_available,maritime_available,warnings_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        self._weather_key(sample),
+                        sample.get("provider") or "unknown",
+                        sample.get("purpose") or "track",
+                        sample.get("track_point_id"),
+                        sample.get("passage_id"),
+                        sample.get("route_candidate"),
+                        sample.get("quality_state") or "modeled",
+                        sample["valid_at_utc"],
+                        requested,
+                        float(sample["latitude"]),
+                        float(sample["longitude"]),
+                        sample.get("wind_speed_kn"),
+                        sample.get("wind_gust_kn"),
+                        sample.get("wind_dir_deg"),
+                        sample.get("wave_height_m"),
+                        sample.get("wave_dir_deg"),
+                        sample.get("wave_period_s"),
+                        sample.get("current_speed_kn"),
+                        sample.get("current_dir_deg"),
+                        sample.get("pressure_hpa"),
+                        sample.get("sea_surface_temp_c"),
+                        int(bool(sample.get("conditions_available"))),
+                        int(bool(sample.get("maritime_available"))),
+                        json.dumps(sample.get("warnings") or [], separators=(",", ":")),
+                    ),
+                )
+                inserted += int(cursor.rowcount == 1)
+            connection.commit()
+        return {"seen": len(items), "stored": inserted}
+
+    @staticmethod
+    def _normalize_weather(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["conditions_available"] = bool(value["conditions_available"])
+        value["maritime_available"] = bool(value["maritime_available"])
+        value["warnings"] = json.loads(value.pop("warnings_json") or "[]")
+        return value
+
+    def query_weather_samples(
+        self, *, start_utc: str | None = None, end_utc: str | None = None
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if start_utc:
+            clauses.append("valid_at_utc>=?")
+            parameters.append(start_utc)
+        if end_utc:
+            clauses.append("valid_at_utc<=?")
+            parameters.append(end_utc)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM weather_samples" + (where + " AND purpose='track'" if where else " WHERE purpose='track'") + " ORDER BY valid_at_utc,id",
+                parameters,
+            ).fetchall()
+            return [self._normalize_weather(row) for row in rows]
+
+    def cached_weather_sample(
+        self,
+        *,
+        latitude: float,
+        longitude: float,
+        valid_at_utc: str,
+        tolerance_minutes: int = 90,
+    ) -> dict[str, Any] | None:
+        target = parse_utc(valid_at_utc)
+        start = (target - timedelta(minutes=tolerance_minutes)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        end = (target + timedelta(minutes=tolerance_minutes)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        recent_model = target >= datetime.now(timezone.utc) - timedelta(hours=48)
+        fresh_after = (
+            (datetime.now(timezone.utc) - timedelta(hours=6))
+            .isoformat()
+            .replace("+00:00", "Z")
+            if recent_model
+            else None
+        )
+        failure_fresh_after = (
+            (datetime.now(timezone.utc) - timedelta(hours=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM weather_samples WHERE valid_at_utc BETWEEN ? AND ? "
+                "AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? "
+                "AND (? IS NULL OR requested_at_utc>=?) "
+                "AND (quality_state!='unavailable' OR requested_at_utc>=?)",
+                (
+                    start,
+                    end,
+                    latitude - 0.2,
+                    latitude + 0.2,
+                    longitude - 0.2,
+                    longitude + 0.2,
+                    fresh_after,
+                    fresh_after,
+                    failure_fresh_after,
+                ),
+            ).fetchall()
+        if not rows:
+            return None
+        row = min(
+            rows,
+            key=lambda item: abs(
+                (parse_utc(item["valid_at_utc"]) - target).total_seconds()
+            )
+            + abs(float(item["latitude"]) - latitude) * 3600
+            + abs(float(item["longitude"]) - longitude) * 3600,
+        )
+        return self._normalize_weather(row)
+
+    def get_vessel_profile(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT profile_json,updated_at_utc FROM vessel_profiles WHERE id=1"
+            ).fetchone()
+        if not row:
+            return {"profile": {}, "updated_at_utc": None}
+        return {
+            "profile": json.loads(row["profile_json"] or "{}"),
+            "updated_at_utc": row["updated_at_utc"],
+        }
+
+    def save_vessel_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        serialized = json.dumps(profile, sort_keys=True, separators=(",", ":"))
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO vessel_profiles(id,profile_json,updated_at_utc) VALUES(1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET profile_json=excluded.profile_json," 
+                "updated_at_utc=excluded.updated_at_utc",
+                (serialized, now),
+            )
+        return {"profile": json.loads(serialized), "updated_at_utc": now}
+
     def add_route_version(
         self,
         passage_id: int,
@@ -875,6 +1781,10 @@ class SQLiteArchive:
         source: str,
         content_sha256: str,
         coordinates: list[list[float]],
+        *,
+        summary: dict[str, Any] | None = None,
+        departure_at_utc: str | None = None,
+        weather_generated_at_utc: str | None = None,
     ) -> dict[str, Any]:
         if len(coordinates) < 2:
             raise ValueError("A planned route needs at least two coordinates")
@@ -891,8 +1801,9 @@ class SQLiteArchive:
                 raise ValueError("Passage not found")
             try:
                 cursor = connection.execute(
-                    "INSERT INTO route_versions(passage_id,label,source,imported_at_utc,content_sha256,route_json) "
-                    "VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO route_versions(passage_id,label,source,imported_at_utc,content_sha256,route_json," 
+                    "summary_json,departure_at_utc,weather_generated_at_utc) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         passage_id,
                         label.strip(),
@@ -900,29 +1811,33 @@ class SQLiteArchive:
                         now,
                         content_sha256,
                         json.dumps(normalized, separators=(",", ":")),
+                        json.dumps(summary or {}, separators=(",", ":")),
+                        departure_at_utc,
+                        weather_generated_at_utc,
                     ),
                 )
             except sqlite3.IntegrityError as err:
-                raise ValueError(
-                    "This exact planned route is already attached to the passage"
-                ) from err
+                existing = connection.execute(
+                    "SELECT * FROM route_versions WHERE passage_id=? AND content_sha256=?",
+                    (passage_id, content_sha256),
+                ).fetchone()
+                if existing:
+                    result = self._normalize_route(existing)
+                    result["unchanged"] = True
+                    return result
+                raise ValueError("The route version could not be stored") from err
             route_id = int(cursor.lastrowid)
-            return dict(
+            return self._normalize_route(
                 connection.execute(
-                    "SELECT id,passage_id,label,source,imported_at_utc,route_json "
-                    "FROM route_versions WHERE id=?",
-                    (route_id,),
+                    "SELECT * FROM route_versions WHERE id=?", (route_id,)
                 ).fetchone()
             )
 
     def current_route(self, passage_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id,passage_id,label,source,imported_at_utc,route_json "
-                "FROM route_versions WHERE passage_id=? ORDER BY imported_at_utc DESC LIMIT 1",
+                "SELECT * FROM route_versions WHERE passage_id=? "
+                "ORDER BY imported_at_utc DESC,id DESC LIMIT 1",
                 (passage_id,),
             ).fetchone()
-            result = _dict(row)
-            if result:
-                result["coordinates"] = json.loads(result.pop("route_json"))
-            return result
+            return self._normalize_route(row)

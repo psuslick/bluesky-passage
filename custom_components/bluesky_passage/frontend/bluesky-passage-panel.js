@@ -1,38 +1,25 @@
 const DOMAIN = "bluesky_passage";
-const SOURCE_COLORS = {
-  canonical: "#00bcd4",
-  garmin_mapshare: "#03a9f4",
-  predictwind_snapshot: "#ff9800",
-  gpx_import: "#ab47bc",
+const COLORS = {
+  speed: "#03a9f4", wind: "#ffb300", gust: "#ef5350", wave: "#7e57c2",
+  garmin_mapshare: "#03a9f4", predictwind_snapshot: "#ff9800",
+  gpx_import: "#ab47bc", ha_recorder: "#26a69a", csv_import: "#78909c",
 };
 
 const esc = (value) => String(value ?? "")
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#039;");
-
-const number = (value, digits = 1, suffix = "") =>
-  Number.isFinite(Number(value)) ? `${Number(value).toFixed(digits)}${suffix}` : "—";
-
-const localTime = (value) => {
+  .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+const finite = (value) => Number.isFinite(Number(value));
+const num = (value, digits = 1, unit = "") => finite(value) ? `${Number(value).toFixed(digits)}${unit}` : "—";
+const local = (value) => {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString([], { timeZoneName: "short" });
 };
-
-const utcTime = (value) => value ? String(value).replace("T", " ").replace("Z", " UTC") : "—";
-
 const bytes = (value) => {
-  let size = Number(value || 0);
+  let result = Number(value || 0); let index = 0;
   const units = ["B", "KB", "MB", "GB"];
-  let index = 0;
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024;
-    index += 1;
-  }
-  return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
+  while (result >= 1024 && index < units.length - 1) { result /= 1024; index += 1; }
+  return `${result.toFixed(index ? 1 : 0)} ${units[index]}`;
 };
 
 class BlueSkyPassagePanel extends HTMLElement {
@@ -40,1070 +27,724 @@ class BlueSkyPassagePanel extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._hass = null;
+    this._ready = false;
     this._state = null;
-    this._query = { points: [], daily_runs: [] };
-    this._range = "current_passage";
+    this._query = { points: [], weather_samples: [], daily_runs: [] };
+    this._tab = "overview";
+    this._range = "24h";
     this._source = "canonical";
+    this._customStart = "";
+    this._customEnd = "";
+    this._mapMode = "local";
     this._selectedIndex = -1;
-    this._center = { lat: 20, lon: -45 };
-    this._zoom = 3;
-    this._fitNext = true;
-    this._choosingDestination = false;
-    this._loading = false;
-    this._initialized = false;
+    this._selectRange = false;
+    this._selectionStart = null;
+    this._selectionEnd = null;
+    this._showGust = false;
+    this._passageId = null;
+    this._passageDetail = null;
+    this._passageDraft = null;
+    this._passagePreview = null;
+    this._backfillJob = null;
+    this._recorderPreview = null;
+    this._recorderRecords = [];
+    this._recorderSelections = {};
+    this._recorderStart = "";
+    this._recorderEnd = "";
+    this._busy = "";
+    this._notice = null;
+    this._mapZoomDelta = 0;
     this._unsubscribe = null;
-    this._timer = null;
-    this._resizeObserver = null;
-    this._drag = null;
   }
 
   set hass(value) {
     this._hass = value;
-    if (!this._initialized && this.isConnected) this._initialize();
-    if (this._initialized) this._renderHeader();
+    if (this.isConnected && !this._ready) this._initialize();
   }
-
   set panel(value) { this._panel = value; }
   set route(value) { this._route = value; }
   set narrow(value) { this._narrow = value; }
+  get _admin() { return Boolean(this._hass?.user?.is_admin); }
+  get _speedUnit() { return this._state?.runtime?.units?.speed || "kn"; }
+  get _heightUnit() { return this._state?.runtime?.units?.height || "m"; }
 
   connectedCallback() {
-    if (this._hass && !this._initialized) this._initialize();
-    else if (this._hass && this._initialized && !this._timer) this._resume();
+    if (this._hass && !this._ready) this._initialize();
   }
 
   disconnectedCallback() {
     if (this._unsubscribe) this._unsubscribe();
     this._unsubscribe = null;
-    if (this._timer) clearInterval(this._timer);
-    this._timer = null;
-    if (this._resizeObserver) this._resizeObserver.disconnect();
-    clearTimeout(this._reloadTimer);
-  }
-
-  async _resume() {
-    this._timer = setInterval(() => this._renderHeader(), 60000);
-    if (this._resizeObserver) {
-      this._resizeObserver.observe(this.shadowRoot.getElementById("map"));
-    }
-    if (!this._unsubscribe) {
-      try {
-        this._unsubscribe = await this._hass.connection.subscribeEvents(
-          () => this._scheduleReload(), "bluesky_passage_data_updated",
-        );
-      } catch (_error) {}
-    }
-    await this._load(false);
   }
 
   async _initialize() {
-    this._initialized = true;
+    this._ready = true;
     this._renderShell();
     this._bindEvents();
-    this._timer = setInterval(() => this._renderHeader(), 60000);
-    this._resizeObserver = new ResizeObserver(() => this._renderMap());
-    this._resizeObserver.observe(this.shadowRoot.getElementById("map"));
     try {
       this._unsubscribe = await this._hass.connection.subscribeEvents(
-        () => this._scheduleReload(),
-        "bluesky_passage_data_updated",
+        () => this._load(false), "bluesky_passage_data_updated",
       );
-    } catch (_error) {
-      // Manual refresh and entity-state updates still work if event subscription
-      // is unavailable in a future frontend build.
-    }
+    } catch (_error) { /* Manual refresh remains available. */ }
     await this._load(true);
-  }
-
-  _scheduleReload() {
-    clearTimeout(this._reloadTimer);
-    this._reloadTimer = setTimeout(() => this._load(false), 600);
   }
 
   _renderShell() {
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; min-height:100%; color:var(--primary-text-color); background:var(--primary-background-color); }
-        * { box-sizing:border-box; }
-        button,input,select,textarea { font:inherit; }
-        button { cursor:pointer; }
-        .page { max-width:1700px; margin:0 auto; padding:20px; }
-        header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; margin-bottom:16px; }
-        h1 { font-size:28px; line-height:1.1; margin:0 0 6px; }
-        h2 { font-size:18px; margin:0 0 14px; }
-        h3 { font-size:15px; margin:18px 0 8px; }
-        .subtle { color:var(--secondary-text-color); font-size:13px; }
-        .actions { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
-        .button { border:1px solid var(--divider-color); border-radius:10px; padding:9px 13px; color:var(--primary-text-color); background:var(--card-background-color); text-decoration:none; }
-        .button:hover { border-color:var(--primary-color); }
-        .button.primary { background:var(--primary-color); color:var(--text-primary-color, white); border-color:var(--primary-color); }
-        .button.danger { color:var(--error-color,#db4437); }
-        .button:disabled { opacity:.45; cursor:not-allowed; }
-        .status { display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border-radius:999px; font-weight:600; font-size:13px; background:rgba(76,175,80,.15); color:#4caf50; }
-        .status.warn { background:rgba(255,152,0,.15); color:#ff9800; }
-        .status.bad { background:rgba(244,67,54,.16); color:#f44336; }
-        .notice { display:none; padding:12px 14px; border-radius:10px; margin-bottom:14px; background:rgba(255,152,0,.15); border:1px solid rgba(255,152,0,.5); }
-        .notice.show { display:block; }
-        .notice.error { background:rgba(244,67,54,.15); border-color:rgba(244,67,54,.5); }
-        .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
-        .metric,.card { background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:13px; box-shadow:var(--ha-card-box-shadow,none); }
-        .metric { padding:13px; min-height:78px; }
-        .metric .label { color:var(--secondary-text-color); font-size:12px; margin-bottom:7px; }
-        .metric .value { font-size:20px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .toolbar { display:flex; align-items:end; flex-wrap:wrap; gap:9px; padding:12px; margin-bottom:14px; }
-        label { display:flex; flex-direction:column; gap:5px; color:var(--secondary-text-color); font-size:12px; }
-        input,select,textarea { min-height:39px; border:1px solid var(--divider-color); border-radius:8px; padding:8px 10px; color:var(--primary-text-color); background:var(--secondary-background-color); }
-        textarea { min-height:70px; resize:vertical; }
-        .custom-range { display:none; gap:9px; }
-        .custom-range.show { display:flex; }
-        .map-layout { display:grid; grid-template-columns:minmax(0,2.15fr) minmax(300px,.85fr); gap:14px; margin-bottom:14px; }
-        .map-card { padding:0; overflow:hidden; position:relative; }
-        #map { position:relative; width:100%; height:590px; overflow:hidden; background:#11212b; touch-action:none; user-select:none; }
-        #tiles,#overlay { position:absolute; inset:0; }
-        #tiles img { position:absolute; width:256px; height:256px; user-select:none; pointer-events:none; }
-        #overlay { width:100%; height:100%; overflow:visible; }
-        .map-controls { position:absolute; z-index:4; top:10px; left:10px; display:flex; flex-direction:column; gap:5px; }
-        .map-controls button { width:38px; height:38px; border:0; border-radius:8px; background:rgba(30,30,30,.88); color:white; font-size:20px; }
-        .map-attribution { position:absolute; right:4px; bottom:3px; z-index:4; background:rgba(255,255,255,.78); color:#222; font-size:10px; padding:2px 4px; }
-        .map-attribution a { color:#1565c0; }
-        .map-hint { position:absolute; z-index:4; left:58px; top:10px; padding:8px 10px; border-radius:7px; color:white; background:rgba(0,0,0,.72); display:none; }
-        .map-hint.show { display:block; }
-        .detail { padding:16px; min-height:590px; overflow:auto; }
-        .detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:9px 14px; }
-        .detail-item { min-width:0; }
-        .detail-item.wide { grid-column:1/-1; }
-        .detail-label { font-size:11px; color:var(--secondary-text-color); text-transform:uppercase; letter-spacing:.04em; }
-        .detail-value { margin-top:3px; overflow-wrap:anywhere; }
-        blockquote { margin:5px 0 0; padding:8px 10px; border-left:3px solid var(--primary-color); background:var(--secondary-background-color); white-space:pre-wrap; }
-        .detail-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:14px; }
-        .legend { position:absolute; z-index:4; bottom:20px; left:10px; padding:7px 9px; border-radius:7px; background:rgba(0,0,0,.7); color:#fff; font-size:11px; }
-        .legend span { margin-right:9px; white-space:nowrap; }
-        .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
-        .charts { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-bottom:14px; }
-        .chart { padding:14px; min-height:238px; overflow:hidden; }
-        .chart svg { width:100%; height:180px; display:block; }
-        .chart-empty { height:175px; display:grid; place-items:center; color:var(--secondary-text-color); }
-        .two-col { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:14px; }
-        .section { padding:16px; }
-        .form-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:10px; }
-        .form-grid .wide { grid-column:span 2; }
-        .row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:12px; }
-        .table-wrap { overflow:auto; }
-        table { width:100%; border-collapse:collapse; font-size:13px; }
-        th,td { text-align:left; padding:8px; border-bottom:1px solid var(--divider-color); vertical-align:top; }
-        th { color:var(--secondary-text-color); font-weight:600; }
-        .admin-only.hidden { display:none; }
-        .safety { padding:13px 15px; border-left:4px solid #ff9800; font-size:13px; }
-        code { background:var(--secondary-background-color); padding:2px 5px; border-radius:4px; }
-        footer { color:var(--secondary-text-color); font-size:12px; padding:4px 2px 20px; }
-        @media (max-width:1100px) {
-          .metrics { grid-template-columns:repeat(3,1fr); }
-          .charts { grid-template-columns:1fr; }
-          .map-layout { grid-template-columns:1fr; }
-          .detail { min-height:auto; }
-          .two-col { grid-template-columns:1fr; }
-        }
-        @media (max-width:650px) {
-          .page { padding:12px; }
-          header { flex-direction:column; }
-          .actions { justify-content:flex-start; }
-          .metrics { grid-template-columns:repeat(2,1fr); }
-          #map { height:440px; }
-          .form-grid { grid-template-columns:1fr 1fr; }
-          .form-grid .wide { grid-column:1/-1; }
-          .custom-range.show { flex-direction:column; }
-        }
+        :host{display:block;min-height:100%;background:var(--primary-background-color);color:var(--primary-text-color)}
+        *{box-sizing:border-box}button,input,select,textarea{font:inherit}button{cursor:pointer}
+        .page{max-width:1540px;margin:auto;padding:22px}.header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}
+        h1{font-size:29px;margin:0 0 5px;line-height:1.1}h2{font-size:19px;margin:0 0 14px}h3{font-size:15px;margin:0 0 9px}
+        .muted{color:var(--secondary-text-color);font-size:13px}.header-actions,.row,.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
+        .status{display:inline-flex;padding:6px 10px;border-radius:999px;background:rgba(76,175,80,.14);color:#4caf50;font-weight:650;font-size:13px}
+        .status.warn{color:#ff9800;background:rgba(255,152,0,.14)}.status.bad{color:#ef5350;background:rgba(239,83,80,.14)}
+        .button{min-height:44px;display:inline-flex;align-items:center;border:1px solid var(--divider-color);border-radius:9px;padding:9px 13px;background:var(--card-background-color);color:var(--primary-text-color);text-decoration:none}
+        .button:hover,.button:focus-visible{border-color:var(--primary-color);outline:none}.button.primary{background:var(--primary-color);border-color:var(--primary-color);color:var(--text-primary-color,#fff)}
+        .button.danger{color:var(--error-color,#ef5350)}.button:disabled{opacity:.45;cursor:not-allowed}.button.small{padding:6px 9px;font-size:12px}
+        .tabs{display:flex;gap:28px;border-bottom:1px solid var(--divider-color);margin-top:20px;overflow:auto}
+        .tab{position:relative;border:0;background:transparent;color:var(--secondary-text-color);padding:14px 2px 13px;white-space:nowrap;font-weight:600}
+        .tab[aria-selected="true"]{color:var(--primary-color)}.tab[aria-selected="true"]:after{content:"";position:absolute;height:3px;border-radius:3px;left:0;right:0;bottom:-1px;background:var(--primary-color)}
+        .notice{margin:14px 0 0;padding:11px 13px;border-radius:9px;border:1px solid rgba(255,152,0,.45);background:rgba(255,152,0,.12)}
+        .notice.error{border-color:rgba(239,83,80,.55);background:rgba(239,83,80,.12)}
+        main{padding-top:16px}.card,.metric{background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:13px;box-shadow:var(--ha-card-box-shadow,none)}
+        .card{padding:16px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:11px;margin-bottom:14px}
+        .metric{padding:14px;min-height:84px}.metric-label{color:var(--secondary-text-color);font-size:12px;margin-bottom:8px}.metric-value{font-size:21px;font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .grid-main{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(290px,.9fr);gap:14px}.stack{display:grid;gap:14px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+        .map-card{padding:0;overflow:hidden}.map{height:540px;position:relative;overflow:hidden;background:#b9d7e5;user-select:none}.map.small{height:420px}
+        .tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px;pointer-events:none}.overlay{width:100%;height:100%;overflow:visible}
+        .map-controls{position:absolute;left:10px;top:10px;z-index:4;display:flex;flex-direction:column;gap:5px}.map-controls button{width:44px;height:44px;border:0;border-radius:7px;background:rgba(28,31,34,.9);color:#fff;font-size:18px}
+        .map-attribution{position:absolute;right:3px;bottom:2px;z-index:4;background:rgba(255,255,255,.8);color:#222;padding:2px 4px;font-size:10px}.map-attribution a{color:#1565c0}
+        .legend{position:absolute;left:9px;bottom:10px;z-index:4;padding:6px 8px;border-radius:7px;background:rgba(0,0,0,.7);color:white;font-size:11px}.swatch{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 8px}.swatch:first-child{margin-left:0}
+        .record{min-height:180px}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.detail-grid .wide{grid-column:1/-1}.detail-label{font-size:11px;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.04em}.detail-value{margin-top:3px;overflow-wrap:anywhere}
+        blockquote{margin:5px 0 0;padding:8px 10px;border-left:3px solid var(--primary-color);background:var(--secondary-background-color);white-space:pre-wrap}
+        .toolbar{padding:12px;margin-bottom:14px;align-items:end}label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--secondary-text-color)}
+        input,select,textarea{min-height:39px;border:1px solid var(--divider-color);border-radius:8px;padding:8px 10px;background:var(--secondary-background-color);color:var(--primary-text-color)}textarea{min-height:78px;resize:vertical}
+        .segmented{display:inline-flex;border:1px solid var(--divider-color);border-radius:9px;overflow:hidden}.segmented button{border:0;border-right:1px solid var(--divider-color);background:var(--card-background-color);color:var(--secondary-text-color);padding:8px 11px}.segmented button:last-child{border-right:0}.segmented button.active{background:var(--primary-color);color:var(--text-primary-color,#fff)}
+        .chart{padding:16px}.chart svg{display:block;width:100%;height:auto;min-height:260px}.chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-bottom:7px}.chart-legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:5px}
+        .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--divider-color);vertical-align:top}th{color:var(--secondary-text-color);font-weight:600}
+        .form-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:11px}.span2{grid-column:span 2}.span4{grid-column:1/-1}.section-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+        .coverage{border-left:4px solid var(--primary-color);padding:12px;background:var(--secondary-background-color);border-radius:7px}.warning{border-left-color:#ff9800}.danger-text{color:var(--error-color,#ef5350)}
+        .progress{height:8px;background:var(--secondary-background-color);border-radius:8px;overflow:hidden;margin:9px 0}.progress span{display:block;height:100%;background:var(--primary-color)}
+        .empty{min-height:160px;display:grid;place-items:center;text-align:center;color:var(--secondary-text-color);padding:24px}.predictwind{height:540px;width:100%;border:0;background:var(--secondary-background-color)}
+        details{margin-top:10px}summary{cursor:pointer;color:var(--secondary-text-color)}.safety{margin-top:14px;border-left:4px solid #ff9800;font-size:13px}footer{font-size:12px;color:var(--secondary-text-color);padding:14px 2px 30px}
+        @media(max-width:1050px){.grid-main,.two{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.map{height:470px}.form-grid{grid-template-columns:repeat(2,1fr)}.span4{grid-column:1/-1}}
+        @media(max-width:620px){.page{padding:12px}.header{flex-direction:column}.tabs{gap:20px}.metrics{grid-template-columns:1fr 1fr}.map{height:390px}.form-grid{grid-template-columns:1fr}.span2,.span4{grid-column:1}.detail-grid{grid-template-columns:1fr}.detail-grid .wide{grid-column:1}}
+        @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
       </style>
-      <div class="page">
-        <header>
-          <div><h1>BlueSky Passage</h1><div id="header-subtitle" class="subtle">Loading local archive…</div></div>
-          <div class="actions">
-            <span id="status" class="status">Loading</span>
-            <a id="garmin-link" class="button" href="#" target="_blank" rel="noopener">Garmin MapShare</a>
-            <a id="predictwind-link" class="button" href="#" target="_blank" rel="noopener">PredictWind</a>
-            <button id="refresh" class="button primary">Refresh Garmin</button>
-            <button id="test-notification" class="button admin-only">Test notification</button>
-            <button id="options" class="button admin-only">Alert options</button>
-          </div>
-        </header>
-        <div id="notice" class="notice"></div>
-        <section id="metrics" class="metrics"></section>
-        <section class="toolbar card">
-          <label>Displayed period
-            <select id="range">
-              <option value="current_passage">Current passage</option>
-              <option value="1d">Last 24 hours</option><option value="3d">Last 3 days</option>
-              <option value="7d">Last 7 days</option><option value="30d">Last 30 days</option>
-              <option value="1y">Last year</option><option value="all">All time</option>
-              <option value="custom">Custom dates</option>
-            </select>
-          </label>
-          <label>Source
-            <select id="source"><option value="canonical">Combined track (Garmin preferred)</option><option value="all">All raw sources</option><option value="garmin_mapshare">Garmin live</option><option value="predictwind_snapshot">PredictWind import</option><option value="gpx_import">GPX import</option></select>
-          </label>
-          <div id="custom-range" class="custom-range">
-            <label>Start (your local time)<input id="range-start" type="datetime-local"></label>
-            <label>End (your local time)<input id="range-end" type="datetime-local"></label>
-          </div>
-          <button id="load-range" class="button">Load / fit map</button>
-          <label class="admin-only">Export
-            <select id="export-format"><option value="csv">CSV</option><option value="geojson">GeoJSON</option><option value="gpx">GPX</option></select>
-          </label>
-          <button id="export" class="button admin-only">Download range</button>
-          <span id="point-count" class="subtle"></span>
-        </section>
-        <div class="map-layout">
-          <section class="map-card card">
-            <div id="map">
-              <div id="tiles"></div><svg id="overlay"></svg>
-              <div class="map-controls"><button id="zoom-in" title="Zoom in">+</button><button id="zoom-out" title="Zoom out">−</button><button id="fit" title="Fit displayed data">⌖</button></div>
-              <div id="map-hint" class="map-hint">Select the exact destination point on the map</div>
-              <div id="legend" class="legend"></div>
-              <div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>
-            </div>
-          </section>
-          <aside id="detail" class="detail card"></aside>
-        </div>
-        <section class="charts">
-          <div class="chart card"><h2>Speed over ground</h2><div id="speed-chart"></div></div>
-          <div class="chart card"><h2>Destination VMC trend</h2><div id="vmc-chart"></div></div>
-          <div class="chart card"><h2>Recorded distance</h2><div id="distance-chart"></div></div>
-          <div class="chart card"><h2>Daily recorded run (UTC)</h2><div id="daily-chart"></div></div>
-          <div class="chart card"><h2>Report gaps</h2><div id="gap-chart"></div></div>
-        </section>
-        <section class="two-col">
-          <div class="section card"><h2>Passage and destination</h2><div id="passage-view"></div><div id="passage-admin" class="admin-only"></div></div>
-          <div class="section card"><h2>Archive and source health</h2><div id="archive-view"></div></div>
-        </section>
-        <section id="data-tools" class="section card admin-only">
-          <h2>Admin data tools</h2>
-          <p class="subtle">Imports are manual, hashed, source-labelled, and rollbackable. Live Garmin records are never deleted by an import rollback.</p>
-          <div class="form-grid">
-            <label class="wide">Historical track file<input id="history-file" type="file" accept=".json,.geojson,.gpx,.xml,.html,.htm"></label>
-            <label>History source<select id="history-source"><option value="predictwind_snapshot">PredictWind snapshot</option><option value="gpx_import">GPX track</option></select></label>
-            <div class="row"><button id="import-history" class="button">Import history</button></div>
-            <label class="wide">Planned route GPX<input id="route-file" type="file" accept=".gpx,.xml"></label>
-            <label>Route label<input id="route-label" value="Planned route"></label>
-            <div class="row"><button id="import-route" class="button">Attach route to passage</button></div>
-          </div>
-          <div id="import-progress" class="subtle"></div>
-          <div id="imports"></div>
-        </section>
-        <section class="safety card">
-          <strong>Safety:</strong> BlueSky Passage, its direct-reference line, ETA, and notifications are supplementary only. The direct line is not a navigational route and does not account for hazards, weather, currents, or routing constraints. Garmin/inReach emergency channels remain authoritative.
-        </section>
-        <footer>Vessel records and the archive stay inside Home Assistant. Garmin/PredictWind access and online OpenStreetMap tiles require the internet; the tile service can see the requesting IP address and viewed map area.</footer>
-      </div>`;
+      <div class="page"><div id="header"></div><div id="tabs"></div><div id="notice-area"></div><main id="content"></main><footer id="footer"></footer></div>`;
   }
 
   _bindEvents() {
-    const root = this.shadowRoot;
-    root.getElementById("refresh").addEventListener("click", () => this._refresh());
-    root.getElementById("test-notification").addEventListener("click", () => this._testNotification());
-    root.getElementById("options").addEventListener("click", () => this._navigate("/config/integrations/integration/bluesky_passage"));
-    root.getElementById("range").addEventListener("change", (event) => {
-      this._range = event.target.value;
-      root.getElementById("custom-range").classList.toggle("show", this._range === "custom");
-    });
-    root.getElementById("source").addEventListener("change", (event) => { this._source = event.target.value; });
-    root.getElementById("load-range").addEventListener("click", () => this._load(true));
-    root.getElementById("export").addEventListener("click", () => this._export());
-    root.getElementById("zoom-in").addEventListener("click", () => { this._zoom = Math.min(18, this._zoom + 1); this._renderMap(); });
-    root.getElementById("zoom-out").addEventListener("click", () => { this._zoom = Math.max(1, this._zoom - 1); this._renderMap(); });
-    root.getElementById("fit").addEventListener("click", () => { this._fitMap(); this._renderMap(); });
-    root.getElementById("import-history").addEventListener("click", () => this._importHistory());
-    root.getElementById("import-route").addEventListener("click", () => this._importRoute());
-
-    const map = root.getElementById("map");
-    map.addEventListener("pointerdown", (event) => this._mapPointerDown(event));
-    map.addEventListener("pointermove", (event) => this._mapPointerMove(event));
-    map.addEventListener("pointerup", (event) => this._mapPointerUp(event));
-    map.addEventListener("pointercancel", () => { this._drag = null; });
-    map.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      this._zoom = Math.max(1, Math.min(18, this._zoom + (event.deltaY < 0 ? 1 : -1)));
-      this._renderMap();
-    }, { passive: false });
-
-    root.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-action]");
-      if (!button) return;
+    this.shadowRoot.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-action]");
+      if (!target) return;
+      const action = target.dataset.action;
       const actions = {
-        "start-passage": () => this._startPassage(),
-        "set-destination": () => this._setDestination(),
-        "choose-destination": () => this._chooseDestination(),
-        "end-passage": () => this._endPassage(),
-        "delete-passage": () => this._deletePassage(Number(button.dataset.id)),
-        "rollback-import": () => this._rollbackImport(Number(button.dataset.id)),
-        "previous-point": () => this._selectRelative(-1),
-        "next-point": () => this._selectRelative(1),
-        "copy-point": () => this._copySelected(),
+        tab: () => this._setTab(target.dataset.tab), refresh: () => this._refresh(),
+        load: () => this._loadQuery(true), zoomin: () => { this._mapZoomDelta += 1; this._renderContent(); },
+        zoomout: () => { this._mapZoomDelta -= 1; this._renderContent(); }, fit: () => { this._mapZoomDelta = 0; this._renderContent(); },
+        point: () => this._selectPoint(Number(target.dataset.index)),
+        "range-select": () => { this._selectRange = !this._selectRange; this._selectionStart = null; this._selectionEnd = null; this._renderContent(); },
+        "clear-range": () => this._clearPointRange(), weather: () => this._weather(),
+        "map-mode": () => { this._mapMode = target.dataset.mode; this._renderContent(); },
+        export: () => this._export(), "open-options": () => this._navigate("/config/integrations/integration/bluesky_passage"),
+        "new-passage": () => this._editPassage(null), "edit-passage": () => this._editPassage(Number(target.dataset.id)),
+        "cancel-passage": () => { this._passageDraft = null; this._passagePreview = null; this._renderContent(); },
+        "preview-passage": () => this._previewPassage(), "save-passage": () => this._savePassage(),
+        "delete-passage": () => this._deletePassage(Number(target.dataset.id)), "plan-route": () => this._planRoute(Number(target.dataset.id)),
+        "save-profile": () => this._saveProfile(), "backfill-preview": () => this._startBackfillPreview(),
+        "backfill-commit": () => this._startBackfillCommit(Number(target.dataset.id)),
+        "backfill-resume": () => this._runBackfill(Number(target.dataset.id), true),
+        "backfill-cancel": () => this._cancelBackfill(Number(target.dataset.id)),
+        "recorder-preview": () => this._previewRecorder(),
+        "recorder-import": () => this._importRecorder(),
+        integrity: () => this._integrity(), "test-notification": () => this._testNotification(),
+        "rollback-import": () => this._rollbackImport(Number(target.dataset.id)), "import-history": () => this._importHistory(),
       };
-      if (actions[button.dataset.action]) actions[button.dataset.action]();
+      if (actions[action]) actions[action]();
     });
-    root.addEventListener("change", (event) => {
-      if (event.target.id === "saved-destination") this._useSavedDestination(event.target.value);
+    this.shadowRoot.addEventListener("change", (event) => {
+      if (event.target.id === "range") { this._range = event.target.value; if (this._range === "custom") this._renderContent(); else this._loadQuery(true); }
+      if (event.target.id === "source") { this._source = event.target.value; this._loadQuery(true); }
+      if (event.target.id === "gust") { this._showGust = event.target.checked; this._renderContent(); }
+      if (event.target.id === "history-passage") { this._passageId = event.target.value ? Number(event.target.value) : null; if (this._range === "passage") this._loadQuery(true); }
+      if (event.target.id === "end-mode") { this._capturePassageDraft(); this._renderContent(); }
+      if (event.target.id === "history-file") this._renderContent();
+    });
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.target.dataset?.action === "point" && ["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        this._selectPoint(Number(event.target.dataset.index));
+        return;
+      }
+      if (!event.target.matches('[role="tab"]') || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      const tabs = ["overview", "history", "passages", "settings"];
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      const next = tabs[(tabs.indexOf(this._tab) + direction + tabs.length) % tabs.length];
+      this._setTab(next); this.shadowRoot.querySelector(`[data-tab="${next}"]`)?.focus();
     });
   }
 
-  async _call(type, data = {}) {
-    return this._hass.callWS({ type: `${DOMAIN}/${type}`, ...data });
+  async _call(name, data = {}) {
+    return this._hass.callWS({ type: `${DOMAIN}/${name}`, ...data });
   }
 
-  _setBusy(busy, message = "") {
-    this._loading = busy;
-    this.shadowRoot.getElementById("refresh").disabled = busy;
-    if (message) this._showNotice(message, false);
-  }
-
-  _showNotice(message, error = false) {
-    const notice = this.shadowRoot.getElementById("notice");
-    notice.textContent = message || "";
-    notice.className = `notice${message ? " show" : ""}${error ? " error" : ""}`;
+  async _load(initial = false) {
+    try {
+      if (initial) this._busy = "Loading local archive…";
+      this._state = await this._call("state");
+      if (!this._passageId && this._state.passages?.length) this._passageId = this._state.passages[0].id;
+      await this._loadQuery(initial);
+    } catch (error) { this._show(error.message || String(error), true); }
+    finally { this._busy = ""; this._render(); }
   }
 
   _customRange() {
     if (this._range !== "custom") return {};
-    const start = this.shadowRoot.getElementById("range-start").value;
-    const end = this.shadowRoot.getElementById("range-end").value;
-    if (!start || !end) throw new Error("Choose both custom start and end dates.");
+    const start = this.shadowRoot.getElementById("range-start")?.value || this._customStart;
+    const end = this.shadowRoot.getElementById("range-end")?.value || this._customEnd;
+    if (!start || !end) throw new Error("Choose both custom dates.");
+    this._customStart = start; this._customEnd = end;
     return { start_utc: new Date(start).toISOString(), end_utc: new Date(end).toISOString() };
   }
 
-  async _load(fit = false) {
-    if (this._loading) return;
-    this._setBusy(true);
-    try {
-      const custom = this._customRange();
-      const [state, query] = await Promise.all([
-        this._call("state"),
-        this._call("points", { range: this._range, source: this._source, max_points: 4000, ...custom }),
-      ]);
-      this._state = state;
-      this._query = query;
-      if (this._selectedIndex >= query.points.length) this._selectedIndex = -1;
-      this._renderAll();
-      if (fit) this._fitMap();
-      this._renderMap();
-      this._showNotice("");
-    } catch (error) {
-      this._showNotice(error.message || String(error), true);
-    } finally {
-      this._setBusy(false);
+  async _loadQuery(fit = false) {
+    if (!this._hass) return;
+    if (fit) this._mapZoomDelta = 0;
+    const payload = { range: this._range, source: this._source, max_points: 4000, ...this._customRange() };
+    if (this._range === "passage") {
+      if (!this._passageId) throw new Error("Choose a passage.");
+      payload.passage_id = this._passageId;
+    } else if (this._passageId) payload.passage_id = this._passageId;
+    if (this._selectionStart && this._selectionEnd) {
+      payload.start_report_id = this._selectionStart;
+      payload.end_report_id = this._selectionEnd;
     }
+    this._query = await this._call("points", payload);
+    this._selectedIndex = this._query.points.length ? this._query.points.length - 1 : -1;
+    this._render();
   }
 
-  async _refresh() {
-    if (!this._hass.user?.is_admin) return;
-    this._setBusy(true, "Requesting one Garmin poll. The report timestamp changes only if Garmin has a newer point.");
-    try {
-      await this._call("refresh");
-      this._setBusy(false);
-      await this._load(false);
-    } catch (error) {
-      this._showNotice(error.message || String(error), true);
-    } finally {
-      this._setBusy(false);
-    }
-  }
-
-  _renderAll() {
-    const admin = Boolean(this._hass.user?.is_admin);
-    this.shadowRoot.querySelectorAll(".admin-only").forEach((node) => node.classList.toggle("hidden", !admin));
-    this.shadowRoot.getElementById("refresh").style.display = admin ? "" : "none";
-    this._renderHeader();
-    this._renderMetrics();
-    this._renderDetail();
-    this._renderCharts();
-    this._renderPassage();
-    this._renderArchive();
-    this._renderImports();
-    const count = this._query;
-    this.shadowRoot.getElementById("point-count").textContent = count.decimated
-      ? `${count.returned.toLocaleString()} displayed of ${count.total_matching.toLocaleString()} matching records`
-      : `${(count.returned || 0).toLocaleString()} records`;
+  _render() {
+    if (!this._state) return;
+    this._renderHeader(); this._renderTabs(); this._renderNotice(); this._renderContent();
+    this.shadowRoot.getElementById("footer").textContent = `BlueSky Passage ${this._state.runtime?.integration_version || ""} · Position history, passage annotations, vessel profile, and cached model samples remain in the dedicated local archive. Online source and map requests disclose the requesting IP address to their provider.`;
   }
 
   _renderHeader() {
-    if (!this._state) return;
     const runtime = this._state.runtime || {};
-    const status = this.shadowRoot.getElementById("status");
-    status.textContent = runtime.status || "Unknown";
-    const latest = this._state.latest;
-    const computedAge = latest?.recorded_at_utc
-      ? Math.max(0, (Date.now() - new Date(latest.recorded_at_utc).getTime()) / 60000)
-      : null;
-    const computedStale = runtime.monitoring && (computedAge == null || computedAge > runtime.stale_minutes);
-    const bad = runtime.status === "EMERGENCY" || runtime.status === "Source unavailable";
-    const warn = computedStale || runtime.gps_problem;
-    if (!bad && computedStale) status.textContent = "Tracking stale";
-    status.className = `status${bad ? " bad" : warn ? " warn" : ""}`;
-    const age = computedAge == null ? "no report" : `${number(computedAge, 0)} min old`;
-    const passage = this._state.passage;
-    this.shadowRoot.getElementById("garmin-link").href = this._state.links?.garmin_mapshare || "#";
-    const predictwindLink = this.shadowRoot.getElementById("predictwind-link");
-    const predictwindUrl = this._state.links?.predictwind || "";
-    predictwindLink.href = predictwindUrl || "#";
-    predictwindLink.style.display = predictwindUrl ? "" : "none";
-    this.shadowRoot.getElementById("header-subtitle").textContent =
-      `${passage ? `${passage.name} · ${passage.status}` : "No active passage"} · ${latest ? age : "archive waiting for first point"}`;
+    const bad = runtime.status === "EMERGENCY" || !runtime.source_available;
+    const warn = runtime.is_stale || runtime.gps_problem;
+    this.shadowRoot.getElementById("header").innerHTML = `
+      <div class="header"><div><h1>BlueSky Passage</h1><div class="muted">${esc(runtime.status)} · ${this._state.archive?.total_points?.toLocaleString?.() || 0} archived Garmin/source records</div></div>
+      <div class="header-actions"><span class="status ${bad ? "bad" : warn ? "warn" : ""}">${esc(runtime.status)}</span></div></div>`;
   }
 
-  _renderMetrics() {
-    const state = this._state;
-    const latest = state.latest || {};
-    const metrics = state.metrics || {};
-    const destination = state.destination;
-    const items = [
-      ["Latest report", localTime(latest.recorded_at_utc)],
-      ["SOG", number(latest.sog_kn, 1, " kn")],
-      ["COG true", number(latest.cog_true, 1, "°")],
-      [destination ? `Range to ${destination.name}` : "Destination range", number(metrics.range_nm, 1, " nmi")],
-      ["Closing rate", number(metrics.closing_rate_kn, 1, " kn")],
-      ["ETA", metrics.eta_utc ? localTime(metrics.eta_utc) : (metrics.eta_status || "—")],
-      ["Light at ETA", metrics.daylight_at_eta?.state || "—"],
-    ];
-    this.shadowRoot.getElementById("metrics").innerHTML = items.map(([label, value]) =>
-      `<div class="metric"><div class="label">${esc(label)}</div><div class="value" title="${esc(value)}">${esc(value)}</div></div>`
-    ).join("");
+  _renderTabs() {
+    const names = { overview: "Overview", history: "History & charts", passages: "Passages", settings: "Data & settings" };
+    this.shadowRoot.getElementById("tabs").innerHTML = `<nav class="tabs" role="tablist" aria-label="BlueSky Passage sections">${Object.entries(names).map(([key, name]) => `<button class="tab" role="tab" aria-selected="${this._tab === key}" tabindex="${this._tab === key ? 0 : -1}" data-action="tab" data-tab="${key}">${name}</button>`).join("")}</nav>`;
   }
 
-  _renderDetail() {
-    const detail = this.shadowRoot.getElementById("detail");
-    const points = this._query.points || [];
-    const point = points[this._selectedIndex];
-    if (!point) {
-      detail.innerHTML = `<h2>Selected record</h2><p class="subtle">Select a track dot to show the data actually associated with that record. Current text is never copied onto older points.</p>`;
-      return;
-    }
-    const destination = this._state.destination;
-    let pointRange = "—";
-    let pointBearing = "—";
-    if (destination && point.latitude != null && point.longitude != null) {
-      pointRange = number(this._haversine(point.latitude, point.longitude, destination.latitude, destination.longitude), 2, " nmi");
-      pointBearing = number(this._bearing(point.latitude, point.longitude, destination.latitude, destination.longitude), 1, "° true");
-    }
-    const field = (label, value, wide = false) => `<div class="detail-item${wide ? " wide" : ""}"><div class="detail-label">${esc(label)}</div><div class="detail-value">${esc(value ?? "—")}</div></div>`;
-    detail.innerHTML = `
-      <h2>Selected record ${this._selectedIndex + 1} of ${points.length}</h2>
-      <div class="detail-grid">
-        ${field("Local time", localTime(point.recorded_at_utc), true)}
-        ${field("UTC", utcTime(point.recorded_at_utc), true)}
-        ${field("Source", point.source)}${field("Source event ID", point.source_event_id)}
-        ${field("Latitude", number(point.latitude, 6))}${field("Longitude", number(point.longitude, 6))}
-        ${field("SOG", number(point.sog_kn, 1, " kn"))}${field("COG true", number(point.cog_true, 1, "°"))}
-        ${field("Elevation", number(point.elevation_m, 1, " m"))}${field("Valid GPS fix", point.valid_gps_fix == null ? "Unknown" : point.valid_gps_fix ? "Yes" : "No")}
-        ${field("Emergency", point.in_emergency == null ? "Unknown" : point.in_emergency ? "YES" : "No")}${field("Gap from prior", number(point.minutes_from_prior, 1, " min"))}
-        ${field("Distance from prior", number(point.distance_from_prior_nm, 3, " nmi"))}${field("Cumulative displayed-range track", number(point.cumulative_distance_nm, 2, " nmi"))}
-        ${field("Destination VMC", number(point.vmc_kn, 1, " kn"))}${field("Archived destination range", number(point.destination_range_nm, 2, " nmi"))}
-        ${field("Range to current destination", pointRange)}${field("Bearing to current destination", pointBearing)}
-        ${field("Quality flags", (point.quality_flags || []).join(", ") || "None", true)}
-        <div class="detail-item wide"><div class="detail-label">Associated event</div><blockquote>${esc(point.event_text || "No event text on this record")}</blockquote></div>
-        <div class="detail-item wide"><div class="detail-label">Associated message</div><blockquote>${esc(point.message_text || "No message on this record")}</blockquote></div>
-      </div>
-      <div class="detail-actions">
-        <button class="button" data-action="previous-point" ${this._selectedIndex <= 0 ? "disabled" : ""}>Previous</button>
-        <button class="button" data-action="next-point" ${this._selectedIndex >= points.length - 1 ? "disabled" : ""}>Next</button>
-        <button class="button" data-action="copy-point">Copy coordinates</button>
-        ${point.latitude != null && point.longitude != null ? `<a class="button" href="https://www.openstreetmap.org/?mlat=${encodeURIComponent(point.latitude)}&mlon=${encodeURIComponent(point.longitude)}#map=12/${encodeURIComponent(point.latitude)}/${encodeURIComponent(point.longitude)}" target="_blank" rel="noopener">Open map</a>` : ""}
-      </div>`;
+  _renderNotice() {
+    const area = this.shadowRoot.getElementById("notice-area");
+    area.innerHTML = this._notice ? `<div class="notice ${this._notice.error ? "error" : ""}">${esc(this._notice.text)}</div>` : "";
   }
 
-  _renderPassage() {
-    const state = this._state;
-    const passage = state.passage;
-    const destination = state.destination;
-    const metrics = state.metrics || {};
-    const view = this.shadowRoot.getElementById("passage-view");
-    if (!passage) {
-      view.innerHTML = `<p>No passage is active. The global archive still records live points. Start a passage to establish a departure time and optional destination.</p>`;
-    } else {
-      view.innerHTML = `
-        <div class="detail-grid">
-          <div><div class="detail-label">Passage</div><div class="detail-value">${esc(passage.name)}</div></div>
-          <div><div class="detail-label">Status</div><div class="detail-value">${esc(passage.status)}</div></div>
-          <div><div class="detail-label">Started</div><div class="detail-value">${esc(localTime(passage.started_at_utc))}</div></div>
-          <div><div class="detail-label">Destination</div><div class="detail-value">${esc(destination?.name || "Track-only")}</div></div>
-          <div><div class="detail-label">Recorded-track distance</div><div class="detail-value">${esc(number(metrics.recorded_track_nm, 2, " nmi"))}</div></div>
-          <div><div class="detail-label">ETA method</div><div class="detail-value">${esc(metrics.eta_status || "—")}</div></div>
-          <div><div class="detail-label">Direct-reference progress</div><div class="detail-value">${esc(number(metrics.direct_progress_nm, 1, " nmi"))} (${esc(number(metrics.direct_progress_percent, 1, "%"))})</div></div>
-          <div><div class="detail-label">Cross-track from direct reference</div><div class="detail-value">${esc(number(metrics.cross_track_nm, 1, " nmi"))} ${esc(metrics.cross_track_side || "")}</div></div>
-          <div><div class="detail-label">Light at ETA</div><div class="detail-value">${esc(metrics.daylight_at_eta?.state || "—")}</div></div>
-          <div><div class="detail-label">Next solar event (UTC)</div><div class="detail-value">${esc(metrics.daylight_at_eta?.next_event || "—")} ${esc(utcTime(metrics.daylight_at_eta?.next_event_utc))}</div></div>
-        </div>
-        ${destination ? `<p class="subtle">The straight line and bearing to ${esc(destination.name)} are labelled direct reference only—not a navigational route. Arrival radius: ${esc(number(destination.arrival_radius_nm, 1, " nmi"))}.</p>` : ""}`;
-    }
-    if (!this._hass.user?.is_admin) return;
-    const admin = this.shadowRoot.getElementById("passage-admin");
-    const nowLocal = this._localInputValue(new Date());
-    const saved = (state.destinations || []).map((item) =>
-      `<option value="${item.id}">${esc(item.name)} · ${number(item.latitude, 4)}, ${number(item.longitude, 4)}</option>`
-    ).join("");
-    const destinationFields = `
-      <h3>${passage ? "Set or revise destination" : "Optional starting destination"}</h3>
-      <div class="form-grid">
-        <label class="wide">Saved destination<select id="saved-destination"><option value="">Choose saved…</option>${saved}</select></label>
-        <label class="wide">Destination name<input id="destination-name" value="${esc(destination?.name || "")}" placeholder="Choose an exact harbor or waypoint"></label>
-        <label>Latitude<input id="destination-latitude" inputmode="decimal" value="${esc(destination?.latitude ?? "")}"></label>
-        <label>Longitude<input id="destination-longitude" inputmode="decimal" value="${esc(destination?.longitude ?? "")}"></label>
-        <label>Arrival radius (nmi)<input id="arrival-radius" type="number" min="0.1" max="100" step="0.1" value="${esc(destination?.arrival_radius_nm ?? 2)}"></label>
-        <div class="row"><button class="button" data-action="choose-destination">Choose on map</button>${passage ? `<button class="button primary" data-action="set-destination">Save new destination version</button>` : ""}</div>
-      </div>`;
-    if (!passage) {
-      admin.innerHTML = `
-        <h3>Start a passage</h3>
-        <div class="form-grid"><label class="wide">Passage name<input id="passage-name" value="Passage ${new Date().toLocaleDateString()}" maxlength="100"></label><label class="wide">Start time (your local time)<input id="passage-start" type="datetime-local" value="${nowLocal}"></label></div>
-        ${destinationFields}<div class="row"><button class="button primary" data-action="start-passage">Start passage</button><span class="subtle">Leave destination blank for track-only mode.</span></div>`;
-    } else {
-      admin.innerHTML = `${destinationFields}<div class="row"><button class="button danger" data-action="end-passage">End passage manually</button><span class="subtle">Reaching the arrival radius marks arrived but never ends the passage automatically.</span></div>`;
-    }
-    const completed = (state.passages || []).filter((item) => item.status === "completed");
-    if (completed.length) {
-      admin.insertAdjacentHTML("beforeend", `<h3>Completed passage metadata</h3><div class="table-wrap"><table><thead><tr><th>Name</th><th>Started</th><th>Destination</th><th></th></tr></thead><tbody>${completed.map((item) => `<tr><td>${esc(item.name)}</td><td>${esc(localTime(item.started_at_utc))}</td><td>${esc(item.destination_name || "Track-only")}</td><td><button class="button danger" data-action="delete-passage" data-id="${item.id}">Delete metadata</button></td></tr>`).join("")}</tbody></table></div><p class="subtle">Deleting passage metadata does not delete global track points.</p>`);
+  _renderContent() {
+    const content = this.shadowRoot.getElementById("content");
+    if (!content || !this._state) return;
+    if (this._tab === "overview") content.innerHTML = this._overviewHtml();
+    if (this._tab === "history") content.innerHTML = this._historyHtml();
+    if (this._tab === "passages") content.innerHTML = this._passagesHtml();
+    if (this._tab === "settings") content.innerHTML = this._settingsHtml();
+    requestAnimationFrame(() => this._afterRender());
+  }
+
+  _afterRender() {
+    if (this._tab === "overview") this._drawMap("overview-map");
+    if (this._tab === "history" && this._mapMode !== "predictwind") this._drawMap("history-map");
+    if (this._tab === "passages" && this.shadowRoot.getElementById("passage-map")) {
+      const route = this._passageDetail?.route?.context_status === "current" ? this._passageDetail.route : null;
+      this._drawMap("passage-map", route);
     }
   }
 
-  _renderArchive() {
-    const archive = this._state.archive || {};
-    const runtime = this._state.runtime || {};
-    const counts = Object.entries(archive.counts_by_source || {}).map(([source, count]) => `${source}: ${Number(count).toLocaleString()}`).join(" · ") || "No records";
-    this.shadowRoot.getElementById("archive-view").innerHTML = `
-      <div class="detail-grid">
-        <div><div class="detail-label">Archive records</div><div class="detail-value">${esc(Number(archive.total_points || 0).toLocaleString())}</div></div>
-        <div><div class="detail-label">Database size</div><div class="detail-value">${esc(bytes(archive.database_bytes))}</div></div>
-        <div><div class="detail-label">Earliest record</div><div class="detail-value">${esc(localTime(archive.first_recorded_at_utc))}</div></div>
-        <div><div class="detail-label">Latest record</div><div class="detail-value">${esc(localTime(archive.last_recorded_at_utc))}</div></div>
-        <div><div class="detail-label">Integrity</div><div class="detail-value">${esc(archive.integrity || "unknown")}</div></div>
-        <div><div class="detail-label">Garmin poll</div><div class="detail-value">${runtime.source_available ? "Available" : "Unavailable"}</div></div>
-        <div class="detail-item wide"><div class="detail-label">By source</div><div class="detail-value">${esc(counts)}</div></div>
-        <div class="detail-item wide"><div class="detail-label">Last successful poll</div><div class="detail-value">${esc(localTime(runtime.last_poll_success_utc))}</div></div>
-      </div>
-      <p class="subtle">Stored indefinitely unless an administrator deliberately removes the integration archive. Home Assistant Recorder purge settings do not purge this database.</p>`;
+  _alertsHtml() {
+    const runtime = this._state.runtime || {}; const latest = this._state.latest || {};
+    const alerts = [];
+    if (latest.in_emergency === true) alerts.push(["error", "Garmin reports emergency mode. Use Garmin’s authoritative emergency process."]);
+    if (!runtime.source_available) alerts.push(["error", `Garmin source unavailable: ${runtime.source_error || "unknown error"}. Stored history remains available.`]);
+    if (runtime.is_stale) {
+      const age = Math.round(Number(runtime.report_age_minutes || 0)); const threshold = Number(runtime.stale_minutes || 0);
+      alerts.push(["", runtime.report_age_minutes == null ? "No Garmin report is archived yet." : `Latest report is ${age} minute${age === 1 ? "" : "s"} old; alert threshold is ${threshold} minute${threshold === 1 ? "" : "s"}.`]);
+    }
+    if (runtime.gps_problem) alerts.push(["", "The latest record explicitly reports an invalid GPS fix."]);
+    return alerts.map(([kind, text]) => `<div class="notice ${kind}">${esc(text)}</div>`).join("");
   }
 
-  _renderImports() {
-    if (!this._hass.user?.is_admin) return;
-    const imports = this._state.imports || [];
-    const target = this.shadowRoot.getElementById("imports");
-    if (!imports.length) { target.innerHTML = ""; return; }
-    target.innerHTML = `<h3>Import batches</h3><div class="table-wrap"><table><thead><tr><th>File/source</th><th>Status</th><th>Rows</th><th>Imported</th><th></th></tr></thead><tbody>${imports.map((item) => `<tr><td>${esc(item.filename)}<br><span class="subtle">${esc(item.source)}</span></td><td>${esc(item.status)}</td><td>${item.rows_inserted.toLocaleString()} / ${item.rows_seen.toLocaleString()}</td><td>${esc(localTime(item.imported_at_utc))}</td><td>${item.status !== "rolled_back" ? `<button class="button danger" data-action="rollback-import" data-id="${item.id}">Rollback</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  _overviewHtml() {
+    const latest = this._state.latest || {};
+    return `${this._alertsHtml()}<section class="metrics">
+      ${this._metric("Latest report", local(latest.recorded_at_utc))}${this._metric("Speed over ground", this._speed(latest.sog_kn))}
+      ${this._metric("Course over ground", num(latest.cog_true, 0, "° true"))}${this._metric("GPS fix", latest.valid_gps_fix == null ? "Unknown" : latest.valid_gps_fix ? "Valid" : "Invalid")}
+      </section><div class="grid-main"><section class="card map-card">${this._mapHtml("overview-map", false)}</section>
+      <aside class="stack"><section class="card record"><h2>Latest report</h2>${this._recordHtml(latest)}</section>
+      <section class="card"><h2>Latest inReach text</h2>${this._state.latest_message ? `<blockquote>${esc(this._state.latest_message.text)}</blockquote><p class="muted">${local(this._state.latest_message.recorded_at_utc)}</p>` : `<div class="empty">No text message is archived.</div>`}</section></aside></div>
+      <section class="card safety"><strong>Supplementary display:</strong> this panel is not a substitute for Garmin emergency channels, certified charts, forecasts, notices, traffic awareness, or skipper judgment.</section>`;
   }
 
-  _renderCharts() {
-    const points = this._query.points || [];
-    this.shadowRoot.getElementById("speed-chart").innerHTML = this._lineChart(points, "sog_kn", "kn", false);
-    this.shadowRoot.getElementById("vmc-chart").innerHTML = this._lineChart(points, "vmc_kn", "kn", false);
-    this.shadowRoot.getElementById("distance-chart").innerHTML = this._lineChart(points, "cumulative_distance_nm", "nmi", true);
-    this.shadowRoot.getElementById("daily-chart").innerHTML = this._barChart(this._query.daily_runs || []);
-    this.shadowRoot.getElementById("gap-chart").innerHTML = this._lineChart(points, "minutes_from_prior", "min", true);
+  _metric(label, value) { return `<article class="metric"><div class="metric-label">${esc(label)}</div><div class="metric-value" title="${esc(value)}">${esc(value)}</div></article>`; }
+
+  _historyHtml() {
+    const passages = this._state.passages || [];
+    const custom = this._range === "custom";
+    const rangeText = this._selectionStart && this._selectionEnd ? "Map selection" : this._range;
+    const metrics = this._query.metrics || {}; const latest = this._query.points?.at(-1) || {};
+    const destinationMetrics = this._query.destination ? `<section class="metrics">${this._metric("Destination range", num(metrics.range_nm, 1, " nmi"))}${this._metric("Recent closing rate", this._speed(metrics.closing_rate_kn))}${this._metric("VMC at latest report", this._speed(latest.vmc_kn))}${this._metric("Estimated arrival", metrics.eta_utc ? local(metrics.eta_utc) : metrics.eta_status || "—")}${this._metric("Light at ETA", metrics.daylight_at_eta?.state || "—")}</section>` : "";
+    const rangeOptions = [["24h","Last 24 hours"],["3d","Last 3 days"],["7d","Last 7 days"],["30d","Last 30 days"],["1y","Last year"],["all","All archived time"],["passage","Selected passage"],["custom","Custom dates"]];
+    return `<section class="toolbar card"><label>Displayed period<select id="range">${rangeOptions.map(([value,label]) => `<option value="${value}" ${this._range === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+      <label>Passage context<select id="history-passage"><option value="">None</option>${passages.map((item) => `<option value="${item.id}" ${this._passageId === item.id ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label>
+      ${custom ? `<label>Start<input id="range-start" type="datetime-local" value="${esc(this._customStart)}"></label><label>End<input id="range-end" type="datetime-local" value="${esc(this._customEnd)}"></label>` : ""}
+      ${custom ? `<button class="button primary" data-action="load">Apply dates</button>` : ""}<button class="button ${this._selectRange ? "primary" : ""}" data-action="range-select">${this._selectRange ? "Selecting two reports…" : "Select map range"}</button>
+      ${this._selectionStart ? `<button class="button" data-action="clear-range">Clear selection</button>` : ""}
+      <span class="muted">${esc(rangeText)} · ${this._query.returned || 0}${this._query.decimated ? ` of ${this._query.total_matching}` : ""} records</span></section>${destinationMetrics}
+      <div class="section-title"><div class="segmented" role="group" aria-label="Map view"><button class="${this._mapMode === "local" ? "active" : ""}" data-action="map-mode" data-mode="local">Local track</button><button class="${this._mapMode === "weather" ? "active" : ""}" data-action="map-mode" data-mode="weather">Weather model</button><button class="${this._mapMode === "predictwind" ? "active" : ""}" data-action="map-mode" data-mode="predictwind">PredictWind</button></div>
+      <div class="row">${this._admin && this._mapMode === "weather" ? `<button class="button" data-action="weather" ${!this._state.weather?.configured || this._busy ? "disabled" : ""}>${this._busy || "Fetch / refresh model data"}</button>` : ""}${this._admin ? `<button class="button" data-action="export" ${this._busy ? "disabled" : ""}>Export CSV</button>` : ""}</div></div>
+      ${this._mapMode === "predictwind" ? this._predictWindHtml() : `<div class="grid-main"><section class="card map-card">${this._mapHtml("history-map", false)}</section><aside class="card record"><h2>Selected report</h2>${this._recordHtml(this._query.points[this._selectedIndex])}</aside></div>`}
+      <section class="card chart"><div class="section-title"><div><h2>Passage analytics</h2><div class="muted">Observed vessel speed with modeled wind and waves over the same time axis. Missing provider values remain gaps.</div></div><label><span>Include wind gusts</span><input id="gust" type="checkbox" ${this._showGust ? "checked" : ""}></label></div>${this._chartHtml()}</section>
+      <details class="card"><summary>Advanced source and data details</summary><div class="toolbar"><label>Source<select id="source">${[["garmin_mapshare","Garmin MapShare"],["canonical","Combined (Garmin preferred)"],["all","All source rows"],["predictwind_snapshot","PredictWind import"],["gpx_import","GPX import"],["ha_recorder","Home Assistant Recorder import"],["csv_import","CSV import"]].map(([value,label]) => `<option value="${value}" ${this._source === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><p class="muted">Weather series are Xweather model values cached on demand, not measurements from the vessel.</p></div></details>`;
   }
 
-  _lineChart(points, key, unit, zeroBased) {
-    const valid = points.filter((point) => Number.isFinite(Number(point[key])) && point.recorded_at_utc);
-    if (valid.length < 2) return `<div class="chart-empty">More records are needed.</div>`;
-    const width = 720, height = 180, left = 48, right = 12, top = 12, bottom = 30;
-    const times = valid.map((point) => new Date(point.recorded_at_utc).getTime());
-    const values = valid.map((point) => Number(point[key]));
-    const minTime = Math.min(...times), maxTime = Math.max(...times);
-    const minValue = zeroBased ? 0 : Math.min(0, ...values);
-    const maxValue = Math.max(...values, 1);
-    const x = (time) => left + (time - minTime) / Math.max(1, maxTime - minTime) * (width - left - right);
-    const y = (value) => height - bottom - (value - minValue) / Math.max(.001, maxValue - minValue) * (height - top - bottom);
-    const sources = [...new Set(valid.map((point) => point.display_track || point.source))];
-    const lines = sources.map((source) => {
-      const sourcePoints = valid.filter((point) => (point.display_track || point.source) === source);
-      let path = "";
-      sourcePoints.forEach((point, index) => {
-        const command = index === 0 || point.break_before ? "M" : "L";
-        path += `${command}${x(new Date(point.recorded_at_utc).getTime()).toFixed(1)},${y(Number(point[key])).toFixed(1)} `;
-      });
-      return `<path d="${path}" fill="none" stroke="${SOURCE_COLORS[source] || "#78909c"}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
-    }).join("");
-    const grid = [0, .5, 1].map((fraction) => {
-      const value = minValue + (maxValue - minValue) * (1 - fraction);
-      const yy = top + fraction * (height - top - bottom);
-      return `<line x1="${left}" y1="${yy}" x2="${width-right}" y2="${yy}" stroke="var(--divider-color)"/><text x="${left-6}" y="${yy+4}" text-anchor="end" fill="var(--secondary-text-color)" font-size="11">${value.toFixed(1)}</text>`;
-    }).join("");
-    return `<svg viewBox="0 0 ${width} ${height}" role="img">${grid}${lines}<text x="${left}" y="${height-7}" fill="var(--secondary-text-color)" font-size="11">${esc(new Date(minTime).toLocaleDateString())}</text><text x="${width-right}" y="${height-7}" text-anchor="end" fill="var(--secondary-text-color)" font-size="11">${esc(new Date(maxTime).toLocaleDateString())}</text><text x="5" y="12" fill="var(--secondary-text-color)" font-size="11">${esc(unit)}</text></svg>`;
+  _predictWindHtml() {
+    const url = this._state.links?.predictwind;
+    if (!url) return `<section class="card empty"><div><h2>PredictWind link not configured</h2><p>Add the public tracking URL in the integration Configure dialog.</p><button class="button primary" data-action="open-options">Open Configure</button></div></section>`;
+    return `<section class="card map-card"><iframe class="predictwind" src="${esc(url)}" title="PredictWind tracking map" loading="lazy" referrerpolicy="no-referrer"></iframe><div class="card"><p class="muted">Loaded only while this view is selected. If PredictWind blocks embedding, open it directly.</p><a class="button" href="${esc(url)}" target="_blank" rel="noopener">Open PredictWind map</a></div></section>`;
   }
 
-  _barChart(runs) {
-    let data = runs.filter((item) => Number(item.distance_nm) > 0);
-    if (this._source !== "all") data = data.filter((item) => item.source === this._source);
-    else if (data.some((item) => item.source === "garmin_mapshare")) data = data.filter((item) => item.source === "garmin_mapshare");
-    data = data.slice(-31);
-    if (!data.length) return `<div class="chart-empty">More movement history is needed.</div>`;
-    const width = 720, height = 180, left = 45, right = 10, top = 12, bottom = 34;
-    const max = Math.max(...data.map((item) => Number(item.distance_nm)), 1);
-    const slot = (width - left - right) / data.length;
-    const bars = data.map((item, index) => {
-      const barHeight = Number(item.distance_nm) / max * (height - top - bottom);
-      const x = left + index * slot + 1;
-      const y = height - bottom - barHeight;
-      return `<rect x="${x}" y="${y}" width="${Math.max(1,slot-2)}" height="${barHeight}" fill="${SOURCE_COLORS[item.source] || "#03a9f4"}"><title>${esc(item.date_utc)}: ${Number(item.distance_nm).toFixed(1)} nmi</title></rect>`;
-    }).join("");
-    return `<svg viewBox="0 0 ${width} ${height}" role="img"><line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="var(--divider-color)"/>${bars}<text x="${left-5}" y="${top+5}" text-anchor="end" fill="var(--secondary-text-color)" font-size="11">${max.toFixed(1)}</text><text x="${left}" y="${height-9}" fill="var(--secondary-text-color)" font-size="11">${esc(data[0].date_utc)}</text><text x="${width-right}" y="${height-9}" text-anchor="end" fill="var(--secondary-text-color)" font-size="11">${esc(data.at(-1).date_utc)}</text><text x="5" y="12" fill="var(--secondary-text-color)" font-size="11">nmi</text></svg>`;
+  _mapHtml(id, small) {
+    return `<div id="${id}" class="map ${small ? "small" : ""}"><div class="tiles"></div><svg class="overlay" role="img" aria-label="Archived vessel track"></svg><div class="map-controls"><button data-action="zoomin" title="Zoom in">+</button><button data-action="zoomout" title="Zoom out">−</button><button data-action="fit" title="Fit track">⌖</button></div><div class="legend"><i class="swatch" style="background:${COLORS.speed}"></i>${esc(this._sourceLabel(this._source))}${this._mapMode === "weather" ? `<i class="swatch" style="background:${COLORS.wind}"></i>Modeled wind` : ""}</div><div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div></div>`;
   }
 
-  _project(lat, lon, zoom = this._zoom) {
-    const scale = 256 * 2 ** zoom;
-    const safeLat = Math.max(-85.05112878, Math.min(85.05112878, Number(lat)));
-    const sinLat = Math.sin(safeLat * Math.PI / 180);
-    return {
-      x: (Number(lon) + 180) / 360 * scale,
-      y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale,
+  _recordHtml(point) {
+    if (!point) return `<div class="empty">Select a report point to inspect its associated data.</div>`;
+    return `<div class="detail-grid"><div class="detail-item wide"><div class="detail-label">Recorded</div><div class="detail-value">${local(point.recorded_at_utc)}</div></div>
+      <div><div class="detail-label">Latitude</div><div class="detail-value">${num(point.latitude, 5)}</div></div><div><div class="detail-label">Longitude</div><div class="detail-value">${num(point.longitude, 5)}</div></div>
+      <div><div class="detail-label">SOG</div><div class="detail-value">${this._speed(point.sog_kn)}</div></div><div><div class="detail-label">COG</div><div class="detail-value">${num(point.cog_true, 0, "° true")}</div></div>
+      <div><div class="detail-label">Elevation</div><div class="detail-value">${this._height(point.elevation_m)}</div></div><div><div class="detail-label">GPS fix</div><div class="detail-value">${point.valid_gps_fix == null ? "Unknown" : point.valid_gps_fix ? "Valid" : "Invalid"}</div></div>
+      ${point.destination_name ? `<div><div class="detail-label">Range to ${esc(point.destination_name)}</div><div class="detail-value">${num(point.destination_range_nm, 1, " nmi")}</div></div><div><div class="detail-label">Velocity made good</div><div class="detail-value">${this._speed(point.vmc_kn)}</div></div>` : ""}
+      <div class="wide"><div class="detail-label">Source / quality</div><div class="detail-value">${esc(this._sourceLabel(point.source))} · ${esc((point.quality_flags || []).join(", ") || "No flags")}</div></div>
+      ${point.message_text ? `<div class="wide"><div class="detail-label">Text on this record</div><blockquote>${esc(point.message_text)}</blockquote></div>` : ""}</div>`;
+  }
+
+  _chartHtml() {
+    const points = this._query.points || []; const weather = this._query.weather_samples || [];
+    const speed = points.map((item) => [new Date(item.recorded_at_utc).getTime(), this._speedValue(item.sog_kn), item.id, Boolean(item.break_before)]);
+    const wind = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._speedValue(item.wind_speed_kn)]);
+    const gust = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._speedValue(item.wind_gust_kn)]);
+    const wave = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._heightValue(item.wave_height_m)]);
+    const all = [...speed, ...wind, ...(this._showGust ? gust : []), ...wave].filter((item) => finite(item[1]));
+    if (all.length < 2) return `<div class="empty">More records are needed. Select Weather model and fetch data to add modeled wind and waves.</div>`;
+    const minX = Math.min(...all.map((item) => item[0])); const maxX = Math.max(...all.map((item) => item[0]));
+    const maxKn = Math.max(1, ...[...speed, ...wind, ...(this._showGust ? gust : [])].filter((i) => finite(i[1])).map((i) => i[1]));
+    const maxWave = Math.max(1, ...wave.filter((i) => finite(i[1])).map((i) => i[1])); const w = 960, h = 270, left = 52, right = 54, top = 18, bottom = 38;
+    const x = (v) => left + (v - minX) / Math.max(maxX - minX, 1) * (w - left - right);
+    const yKn = (v) => top + (1 - v / maxKn) * (h - top - bottom); const yWave = (v) => top + (1 - v / maxWave) * (h - top - bottom);
+    const paths = (values, y) => {
+      const segments = []; let segment = [];
+      for (const item of values) {
+        if (!finite(item[1]) || item[3]) { if (segment.length) segments.push(segment); segment = []; }
+        if (finite(item[1])) segment.push(item);
+      }
+      if (segment.length) segments.push(segment);
+      return segments.map((items) => items.map((item, index) => `${index ? "L" : "M"}${x(item[0]).toFixed(1)},${y(item[1]).toFixed(1)}`).join(" "));
     };
+    const lines = [[speed, COLORS.speed, yKn], [wind, COLORS.wind, yKn], ...(this._showGust ? [[gust, COLORS.gust, yKn]] : []), [wave, COLORS.wave, yWave]];
+    return `<div class="chart-legend"><span><i style="background:${COLORS.speed}"></i>Vessel SOG (observed)</span><span><i style="background:${COLORS.wind}"></i>Wind (modeled)</span>${this._showGust ? `<span><i style="background:${COLORS.gust}"></i>Gust (modeled)</span>` : ""}<span><i style="background:${COLORS.wave}"></i>Wave height (modeled)</span></div>
+      <svg viewBox="0 0 ${w} ${h}" aria-label="Linked time series"><g stroke="var(--divider-color)" stroke-width="1">${[0,.25,.5,.75,1].map((f) => `<line x1="${left}" x2="${w-right}" y1="${top+f*(h-top-bottom)}" y2="${top+f*(h-top-bottom)}"/>`).join("")}</g>
+      <g fill="var(--secondary-text-color)" font-size="11"><text x="5" y="${top+4}">${maxKn.toFixed(0)} ${esc(this._speedUnit)}</text><text x="20" y="${h-bottom+4}">0</text><text x="${w-right+7}" y="${top+4}">${maxWave.toFixed(1)} ${esc(this._heightUnit)}</text><text x="${left}" y="${h-10}">${esc(local(new Date(minX).toISOString()))}</text><text text-anchor="end" x="${w-right}" y="${h-10}">${esc(local(new Date(maxX).toISOString()))}</text></g>
+      ${lines.map(([values, color, y]) => paths(values, y).map((path) => `<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`).join("")).join("")}
+      ${lines.map(([values, color, y]) => values.filter((item) => finite(item[1])).map((item) => `<circle cx="${x(item[0])}" cy="${y(item[1])}" r="2.5" fill="${color}"/>`).join("")).join("")}
+      ${this._selectedIndex >= 0 && points[this._selectedIndex] ? `<line x1="${x(new Date(points[this._selectedIndex].recorded_at_utc).getTime())}" x2="${x(new Date(points[this._selectedIndex].recorded_at_utc).getTime())}" y1="${top}" y2="${h-bottom}" stroke="var(--primary-text-color)" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>` : ""}
+      ${speed.filter((item) => finite(item[1])).map((item) => `<circle data-action="point" data-index="${points.findIndex((p) => p.id === item[2])}" cx="${x(item[0])}" cy="${yKn(item[1])}" r="8" fill="${COLORS.speed}" opacity=".001" tabindex="0" role="button" aria-label="Select report ${esc(local(new Date(item[0]).toISOString()))}"><title>${local(new Date(item[0]).toISOString())}: ${item[1]} ${esc(this._speedUnit)}</title></circle>`).join("")}</svg>`;
   }
 
-  _unproject(x, y, zoom = this._zoom) {
-    const scale = 256 * 2 ** zoom;
-    const lon = x / scale * 360 - 180;
-    const n = Math.PI - 2 * Math.PI * y / scale;
-    const lat = 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
-    return { lat, lon };
+  _passagesHtml() {
+    const passages = this._state.passages || [];
+    if (this._passageDraft) return this._passageFormHtml();
+    return `<div class="section-title"><div><h2>Passages</h2><div class="muted">Editable time annotations over one continuous archive. Open-ended means “from this date onward”; it is not a live operating mode.</div></div>${this._admin ? `<button class="button primary" data-action="new-passage">Create passage</button>` : ""}</div>
+      <section class="card table-wrap"><table><thead><tr><th>Name</th><th>Time range</th><th>Destination</th><th>Coverage</th><th></th></tr></thead><tbody>${passages.length ? passages.map((item) => `<tr><td><strong>${esc(item.name)}</strong><br><span class="muted">${item.ended_at_utc ? "Specific range" : "Open-ended range"}</span></td><td>${local(item.started_at_utc)}<br>${item.ended_at_utc ? `to ${local(item.ended_at_utc)}` : "No end date"}</td><td>${esc(item.destination_name || "—")}</td><td>${Number(item.report_count || 0).toLocaleString()} reports</td><td><div class="row"><button class="button small" data-action="edit-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._admin ? "View / edit" : "View"}</button>${this._admin && item.destination_name ? `<button class="button small" data-action="plan-route" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._busy || "Create route comparison"}</button>` : ""}${this._admin ? `<button class="button small danger" data-action="delete-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>Delete</button>` : ""}</div></td></tr>`).join("") : `<tr><td colspan="5"><div class="empty">No passage annotations yet. Your Garmin archive continues independently.</div></td></tr>`}</tbody></table></section>
+      ${this._passageDetail ? `<div class="grid-main" style="margin-top:14px"><section class="card map-card">${this._mapHtml("passage-map",true)}</section><section class="card"><h2>${esc(this._passageDetail.name)}</h2><p>${local(this._passageDetail.started_at_utc)} ${this._passageDetail.ended_at_utc ? `to ${local(this._passageDetail.ended_at_utc)}` : "onward"}</p><p>Destination: ${esc(this._passageDetail.destination_name || "not set")} · ${Number(this._passageDetail.coverage?.report_count || 0).toLocaleString()} reports</p>${this._passageDetail.route ? this._routeHtml(this._passageDetail.route) : `<p class="muted">No calculated comparison is saved for this passage.</p>`}</section></div>` : ""}`;
   }
 
-  _screen(lat, lon, width, height) {
-    const point = this._project(lat, lon);
-    const center = this._project(this._center.lat, this._center.lon);
-    const world = 256 * 2 ** this._zoom;
-    let dx = point.x - center.x;
-    if (dx > world / 2) dx -= world;
-    if (dx < -world / 2) dx += world;
-    return { x: width / 2 + dx, y: height / 2 + point.y - center.y };
+  _newDraft() {
+    const now = new Date(); return { id: null, name: "", start: this._localInput(now), end_mode: "open", end: "", departure_name: "", departure_latitude: "", departure_longitude: "", notes: "", destination_name: "", destination_latitude: "", destination_longitude: "", destination_effective: "", arrival_radius_nm: 2, destination_notes: "" };
   }
 
-  _renderMap() {
-    if (!this._state) return;
-    const map = this.shadowRoot.getElementById("map");
-    const width = map.clientWidth, height = map.clientHeight;
-    if (!width || !height) return;
-    const centerWorld = this._project(this._center.lat, this._center.lon);
-    const tileSize = 256, count = 2 ** this._zoom;
-    const minTileX = Math.floor((centerWorld.x - width / 2) / tileSize);
-    const maxTileX = Math.floor((centerWorld.x + width / 2) / tileSize);
-    const minTileY = Math.max(0, Math.floor((centerWorld.y - height / 2) / tileSize));
-    const maxTileY = Math.min(count - 1, Math.floor((centerWorld.y + height / 2) / tileSize));
-    const tiles = [];
-    for (let x = minTileX; x <= maxTileX; x += 1) {
-      for (let y = minTileY; y <= maxTileY; y += 1) {
-        const wrappedX = ((x % count) + count) % count;
-        const left = width / 2 + x * tileSize - centerWorld.x;
-        const top = height / 2 + y * tileSize - centerWorld.y;
-        // OpenStreetMap's public tile policy requires a valid browser Referer.
-        // Send only the Home Assistant origin, never this panel's path.
-        tiles.push(`<img alt="" draggable="false" referrerpolicy="origin" src="https://tile.openstreetmap.org/${this._zoom}/${wrappedX}/${y}.png" style="left:${left}px;top:${top}px">`);
+  async _editPassage(id) {
+    this._passagePreview = null; this._passageDetail = null;
+    if (id == null) this._passageDraft = this._newDraft();
+    else {
+      try {
+        const item = await this._call("passage_detail", { passage_id: id }); this._passageDetail = item;
+        if (!this._admin) {
+          this._passageDraft = null;
+          this._query = await this._call("points", { range:"passage", passage_id:id, source:"garmin_mapshare", max_points:4000 });
+          this._selectedIndex = this._query.points.length ? this._query.points.length - 1 : -1;
+          this._renderContent();
+          return;
+        }
+        this._passageDraft = { id, name: item.name, start: this._localInput(new Date(item.started_at_utc)), end_mode: item.ended_at_utc ? "specific" : "open", end: item.ended_at_utc ? this._localInput(new Date(item.ended_at_utc)) : "", departure_name: item.departure_name || "", departure_latitude: item.departure_latitude ?? "", departure_longitude: item.departure_longitude ?? "", notes: item.notes || "", destination_name: item.destination_name || "", destination_latitude: item.destination_latitude ?? "", destination_longitude: item.destination_longitude ?? "", destination_effective: item.destination_effective_at_utc ? this._localInput(new Date(item.destination_effective_at_utc)) : "", arrival_radius_nm: item.arrival_radius_nm ?? 2, destination_notes: item.destination_versions?.at(-1)?.notes || "" };
+      } catch (error) { this._show(error.message || String(error), true); }
+    }
+    this._renderContent();
+  }
+
+  _passageFormHtml() {
+    const d = this._passageDraft; const preview = this._passagePreview;
+    return `<div class="section-title"><div><h2>${d.id ? "Edit passage" : "Create passage"}</h2><div class="muted">Nothing is copied or deleted from the raw report archive.</div></div><button class="button" data-action="cancel-passage">Back to passages</button></div>
+      <section class="card"><div class="form-grid"><label class="span2">Passage name<input id="p-name" value="${esc(d.name)}"></label><label>Start date and time<input id="p-start" type="datetime-local" value="${esc(d.start)}"></label><label>Range type<select id="end-mode"><option value="open" ${d.end_mode === "open" ? "selected" : ""}>Open-ended</option><option value="specific" ${d.end_mode === "specific" ? "selected" : ""}>Specific end</option></select></label>
+      ${d.end_mode === "specific" ? `<label>End date and time<input id="p-end" type="datetime-local" value="${esc(d.end)}"></label>` : ""}<label class="span2">Departure name (optional)<input id="p-departure" value="${esc(d.departure_name)}"></label><label>Departure latitude (optional)<input id="p-departure-lat" type="number" step="any" value="${esc(d.departure_latitude)}"></label><label>Departure longitude (optional)<input id="p-departure-lon" type="number" step="any" value="${esc(d.departure_longitude)}"></label><label class="span4">Notes<textarea id="p-notes">${esc(d.notes)}</textarea></label></div>
+      <h3 style="margin-top:20px">Destination (optional)</h3><div class="form-grid"><label class="span2">Destination name<input id="p-destination" value="${esc(d.destination_name)}"></label><label>Latitude<input id="p-destination-lat" type="number" step="any" value="${esc(d.destination_latitude)}"></label><label>Longitude<input id="p-destination-lon" type="number" step="any" value="${esc(d.destination_longitude)}"></label><label>Effective from (optional)<input id="p-destination-effective" type="datetime-local" value="${esc(d.destination_effective)}"></label><label>Context radius<input id="p-radius" type="number" min=".1" max="100" step=".1" value="${esc(d.arrival_radius_nm)}"></label><label class="span2">Destination notes<input id="p-destination-notes" value="${esc(d.destination_notes)}"></label></div>
+      <div class="row"><button class="button primary" data-action="preview-passage">Preview archive coverage</button>${preview ? `<button class="button primary" data-action="save-passage">Save passage</button>` : ""}</div></section>
+      ${preview ? `<section class="coverage ${preview.conflicts?.length || preview.destination_versions_removed ? "warning" : ""}" style="margin-top:14px"><strong>Coverage preview</strong><p>${preview.report_count.toLocaleString()} Garmin reports · ${preview.gap_count} gaps over 90 minutes · first ${local(preview.first_report_utc)} · last ${local(preview.last_report_utc)}</p>${preview.conflicts?.length ? `<p><strong>Overlaps:</strong> ${preview.conflicts.map((item) => esc(item.name)).join(", ")}. Overlap is allowed; confirm it is intentional.</p>` : ""}${preview.destination_versions_removed ? `<p><strong>Destination removal:</strong> saving will remove ${preview.destination_versions_removed} saved destination version${preview.destination_versions_removed === 1 ? "" : "s"} from this passage and mark its route comparison stale.</p>` : ""}<span class="muted">Raw reports unchanged: yes. Save is locked to this exact preview.</span></section><section class="card map-card" style="margin-top:14px">${this._mapHtml("passage-map",true)}</section>` : ""}
+      ${this._passageDetail?.route ? `<section class="card" style="margin-top:14px">${this._routeHtml(this._passageDetail.route)}</section>` : ""}`;
+  }
+
+  _capturePassageDraft() {
+    if (!this._passageDraft) return;
+    const get = (id) => this.shadowRoot.getElementById(id)?.value ?? "";
+    Object.assign(this._passageDraft, { name: get("p-name"), start: get("p-start"), end_mode: get("end-mode") || this._passageDraft.end_mode, end: get("p-end"), departure_name: get("p-departure"), departure_latitude: get("p-departure-lat"), departure_longitude: get("p-departure-lon"), notes: get("p-notes"), destination_name: get("p-destination"), destination_latitude: get("p-destination-lat"), destination_longitude: get("p-destination-lon"), destination_effective: get("p-destination-effective"), arrival_radius_nm: get("p-radius") || 2, destination_notes: get("p-destination-notes") });
+  }
+
+  _passagePayload() {
+    this._capturePassageDraft(); const d = this._passageDraft;
+    if (!d.name.trim() || !d.start) throw new Error("Passage name and start are required.");
+    const payload = { ...(d.id ? { passage_id: d.id } : {}), name: d.name.trim(), start_utc: new Date(d.start).toISOString(), end_utc: d.end_mode === "specific" ? new Date(d.end).toISOString() : null, departure_name: d.departure_name.trim(), notes: d.notes };
+    if ((d.departure_latitude === "") !== (d.departure_longitude === "")) throw new Error("Enter both departure coordinates or neither.");
+    if (d.departure_latitude !== "") { payload.departure_latitude = Number(d.departure_latitude); payload.departure_longitude = Number(d.departure_longitude); }
+    const anyDestination = d.destination_name || d.destination_latitude !== "" || d.destination_longitude !== "";
+    if (anyDestination) {
+      if (!d.destination_name || d.destination_latitude === "" || d.destination_longitude === "") throw new Error("Destination name, latitude, and longitude are required together.");
+      payload.destination = { name: d.destination_name.trim(), latitude: Number(d.destination_latitude), longitude: Number(d.destination_longitude), arrival_radius_nm: Number(d.arrival_radius_nm || 2), effective_at_utc: d.destination_effective ? new Date(d.destination_effective).toISOString() : payload.start_utc, notes: d.destination_notes };
+    }
+    payload.clear_destination = !payload.destination && Boolean(d.id);
+    return payload;
+  }
+
+  async _previewPassage() { try { const payload=this._passagePayload(); this._passagePreview = await this._call("passage_preview", payload); const end=payload.end_utc || this._state.archive?.last_recorded_at_utc || new Date().toISOString(); this._query=await this._call("points",{range:"custom",start_utc:payload.start_utc,end_utc:end,source:"garmin_mapshare",max_points:4000}); this._selectedIndex=this._query.points.length?this._query.points.length-1:-1; this._renderContent(); } catch (error) { this._show(error.message || String(error), true); } }
+  async _savePassage() { try { const payload = this._passagePayload(); await this._call("passage_save", { ...payload, preview_token: this._passagePreview.preview_token }); this._passageDraft = null; this._passagePreview = null; this._passageDetail = null; await this._load(false); this._setTab("passages"); this._show("Passage annotation saved. Raw Garmin reports were not modified."); } catch (error) { this._show(error.message || String(error), true); } }
+  async _deletePassage(id) { if (!confirm("Delete this passage annotation? Raw reports and weather samples remain.")) return; try { await this._call("passage_delete", { passage_id: id }); await this._load(false); this._show("Passage metadata deleted; raw reports retained."); } catch (error) { this._show(error.message || String(error), true); } }
+
+  async _planRoute(id) {
+    try { this._busy = "Calculating comparison…"; this._show("Calculating and caching the route comparison…"); this._renderContent(); const route = await this._call("route_plan", { passage_id: id }); this._passageDetail = await this._call("passage_detail", { passage_id: id }); this._query = await this._call("points", { range:"passage", passage_id:id, source:"garmin_mapshare", max_points:4000 }); this._selectedIndex = this._query.points.length ? this._query.points.length - 1 : -1; this._show(route.summary?.weather_used ? "Weather-informed route comparison saved." : "Great-circle reference saved. Xweather was not available, so no weather optimization is claimed."); this._renderContent(); }
+    catch (error) { this._show(error.message || String(error), true); } finally { this._busy = ""; this._renderContent(); }
+  }
+
+  _routeHtml(route) {
+    const s = route.summary || {}; const selected = s.selected || {}; const actual=s.actual || {};
+    const contextWarning = route.context_status && route.context_status !== "current" ? `<div class="notice">${esc(route.context_warning || "Recalculate this comparison before using it.")}</div>` : "";
+    return `<h2>Route comparison</h2>${contextWarning}<div class="metrics">${this._metric("Method", s.method === "xweather_comparison" ? "Xweather comparison" : "Great-circle reference")}${this._metric("Distance", num(selected.distance_nm, 1, " nmi"))}${this._metric("Estimated duration", num(selected.estimated_hours, 1, " h"))}${this._metric("Estimated arrival", local(selected.eta_utc))}</div>
+      <h3>Actual track ${actual.through_report_utc ? `through ${local(actual.through_report_utc)}` : "within the saved analysis range"}</h3><div class="metrics">${this._metric("Recorded distance",num(actual.recorded_distance_nm,1," nmi"))}${this._metric("Observed elapsed",num(actual.elapsed_hours,1," h"))}${this._metric("Range remaining",num(actual.range_remaining_nm,1," nmi"))}${this._metric("Max deviation from direct",num(actual.max_cross_track_from_direct_nm,1," nmi"))}</div><p class="muted">${esc(actual.coverage_note || "Actual analysis requires archived Garmin reports.")}</p>
+      <p class="muted">${esc(s.disclaimer || "Comparison only—not a navigable route.")}</p>${s.warnings?.length ? `<p class="danger-text">${s.warnings.map(esc).join(" · ")}</p>` : ""}
+      <div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Distance</th><th>Estimated hours</th><th>Risk score</th><th>Model coverage</th></tr></thead><tbody>${(s.candidates || []).map((item) => `<tr><td>${esc(item.label)}${item.key === selected.key ? " · selected" : ""}</td><td>${num(item.distance_nm, 1, " nmi")}</td><td>${num(item.estimated_hours, 1)}</td><td>${num(item.risk_score, 1)}</td><td>${item.weather_coverage_segments ?? 0} segments</td></tr>`).join("")}</tbody></table></div>`;
+  }
+
+  _settingsHtml() {
+    const archive = this._state.archive || {}; const weather = this._state.weather || {}; const profile = this._state.vessel_profile?.profile || {}; const jobs = this._state.backfill_jobs || []; const job = this._backfillJob || jobs[0];
+    const progress = job ? Math.round(100 * Number(job.chunks_completed || 0) / Math.max(Number(job.chunks_total || 1), 1)) : 0;
+    if (!this._admin) return `<section class="card"><h2>Data & settings</h2><p>Administrator access is required to change data, run provider requests, export, or test notifications.</p><div class="detail-grid"><div><div class="detail-label">Archived records</div><div class="detail-value">${Number(archive.total_points || 0).toLocaleString()}</div></div><div><div class="detail-label">Integrity</div><div class="detail-value">${esc(archive.integrity)}</div></div><div><div class="detail-label">Xweather</div><div class="detail-value">${weather.configured ? "Configured" : "Not configured"}</div></div></div></section>`;
+    return `<div class="two"><section class="card"><h2>Archive health</h2><div class="detail-grid"><div><div class="detail-label">Records</div><div class="detail-value">${Number(archive.total_points || 0).toLocaleString()}</div></div><div><div class="detail-label">On-disk size</div><div class="detail-value">${bytes(archive.database_bytes)}</div></div><div><div class="detail-label">Earliest</div><div class="detail-value">${local(archive.first_recorded_at_utc)}</div></div><div><div class="detail-label">Latest</div><div class="detail-value">${local(archive.last_recorded_at_utc)}</div></div><div><div class="detail-label">Schema</div><div class="detail-value">v${archive.schema_version}</div></div><div><div class="detail-label">Integrity</div><div class="detail-value">${esc(archive.integrity)}</div></div></div><div class="row"><button class="button" data-action="integrity">Run integrity check</button><button class="button" data-action="test-notification">Test notification</button><button class="button" data-action="open-options">Integration Configure</button></div></section>
+      <section class="card"><h2>Online sources</h2><p><strong>Garmin:</strong> ${this._state.runtime?.source_available ? "available" : "unavailable"}<br><span class="muted">Normal 10-minute poll · rolling 48-hour request · unseen records only</span></p><p><strong>Xweather:</strong> ${weather.configured ? "configured" : "not configured"}<br><span class="muted">Backend-only credentials · on-demand cache · ${Number(weather.stored_samples || 0).toLocaleString()} stored model samples</span></p>${weather.last_error ? `<p class="danger-text">${esc(weather.last_error)}</p>` : ""}<p><strong>PredictWind:</strong> ${this._state.links?.predictwind ? "public link configured" : "not configured"}</p><div class="row"><a class="button" href="${esc(this._state.links?.garmin_mapshare || "#")}" target="_blank" rel="noopener">Open Garmin MapShare</a>${this._state.links?.predictwind ? `<a class="button" href="${esc(this._state.links.predictwind)}" target="_blank" rel="noopener">Open PredictWind</a>` : ""}<button class="button" data-action="refresh" ${this._busy ? "disabled" : ""}>${this._busy || "Refresh Garmin now"}</button></div></section></div>
+      <section class="card" style="margin-top:14px"><div class="section-title"><div><h2>Garmin historical backfill</h2><div class="muted">Preview first. Requests run in resumable seven-day chunks; duplicates are ignored. Commit creates one rollbackable import batch.</div></div></div><div class="toolbar"><label>Start date<input id="backfill-start" type="date" value="${this._dateInput(new Date(Date.now()-365*86400000))}"></label><label>End date<input id="backfill-end" type="date" value="${this._dateInput(new Date())}"></label><button class="button primary" data-action="backfill-preview">Preview Garmin availability</button></div>
+      ${job ? `<div class="coverage ${job.status === "failed" ? "warning" : ""}"><strong>${esc(job.phase)} job #${job.id} · ${esc(job.status)}</strong><div class="progress"><span style="width:${progress}%"></span></div><p>${job.chunks_completed}/${job.chunks_total} chunks · ${Number(job.records_returned || 0).toLocaleString()} returned · ${Number(job.records_inserted || 0).toLocaleString()} ${job.phase === "preview" ? "expected new" : "inserted"} · ${Number(job.records_duplicated || 0).toLocaleString()} already archived</p>${job.error ? `<p class="danger-text">${esc(job.error)}</p>` : ""}<div class="row">${job.phase === "preview" && job.status === "completed" ? `<button class="button primary" data-action="backfill-commit" data-id="${job.id}">Import previewed range</button>` : ""}${job.status === "failed" ? `<button class="button" data-action="backfill-resume" data-id="${job.id}">Resume failed chunk</button>` : ""}${["pending","running","failed"].includes(job.status) ? `<button class="button danger" data-action="backfill-cancel" data-id="${job.id}">Cancel</button>` : ""}</div></div>` : ""}</section>
+      <section class="card" style="margin-top:14px"><h2>Vessel performance profile</h2><p class="muted">All fields are optional. Missing values use an observed, hull-speed, or generic fallback in that order. Saving recalculates the selected passage route when a passage context is chosen.</p><div class="form-grid">
+      ${this._profileField("Vessel name", "vessel_name", profile.vessel_name)}${this._profileField("Hull configuration", "hull_configuration", profile.hull_configuration)}${this._profileField("Length overall (ft)", "length_overall_ft", profile.length_overall_ft, true)}${this._profileField("Waterline length (ft)", "waterline_length_ft", profile.waterline_length_ft, true)}${this._profileField("Beam (ft)", "beam_ft", profile.beam_ft, true)}${this._profileField("Draft (ft)", "draft_ft", profile.draft_ft, true)}${this._profileField("Displacement (lb)", "displacement_lb", profile.displacement_lb, true)}${this._profileField("Sail area (sq ft)", "sail_area_sqft", profile.sail_area_sqft, true)}${this._profileField("Engine cruise (kn)", "engine_cruise_speed_kn", profile.engine_cruise_speed_kn, true)}${this._profileField("Observed cruise (kn)", "observed_cruise_speed_kn", profile.observed_cruise_speed_kn, true)}${this._profileField("Comfortable wave max (m)", "max_comfortable_wave_m", profile.max_comfortable_wave_m, true)}
+      <label class="span4">Polar table JSON (optional)<textarea id="profile-polar" placeholder='[{"twa_deg":60,"tws_kn":12,"boat_speed_kn":6.2}]'>${esc(profile.polar_table?.length ? JSON.stringify(profile.polar_table, null, 2) : "")}</textarea></label></div><div class="row"><label>Recalculate passage<select id="profile-passage"><option value="">None</option>${(this._state.passages || []).map((item) => `<option value="${item.id}" ${this._passageId === item.id ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><button class="button primary" data-action="save-profile">Save performance profile</button></div></section>
+      ${this._recorderRecoveryHtml()}
+      <section class="card" style="margin-top:14px"><h2>Manual source import</h2><p class="muted">Use only when Garmin backfill cannot supply a source. JSON/GeoJSON and GPX rows are source-labelled and rollbackable.</p><div class="toolbar"><label>File<input id="history-file" type="file" accept=".json,.geojson,.gpx,.xml"></label><label>Source<select id="history-source"><option value="predictwind_snapshot">PredictWind snapshot</option><option value="gpx_import">GPX import</option><option value="csv_import">CSV-normalized JSON</option></select></label><button class="button" data-action="import-history">Import file</button></div><div class="table-wrap"><table><thead><tr><th>Batch</th><th>Source</th><th>Status</th><th>Rows</th><th></th></tr></thead><tbody>${(this._state.imports || []).map((item) => `<tr><td>${esc(item.filename)}</td><td>${esc(item.source)}</td><td>${esc(item.status)}</td><td>${item.rows_inserted}/${item.rows_seen}</td><td>${["completed","failed"].includes(item.status) ? `<button class="button small danger" data-action="rollback-import" data-id="${item.id}">Rollback</button>` : ""}</td></tr>`).join("")}</tbody></table></div></section>
+      <section class="card safety"><strong>Storage choice:</strong> the current application/high-endurance microSD is supported. This release bounds the SQLite WAL, deduplicates overlapping polls, chunks backfill, and never runs weather/routing continuously. An SSD is a later resilience upgrade, not an installation requirement.</section>`;
+  }
+
+  _recorderCandidates(domains, pattern) {
+    return Object.entries(this._hass?.states || {})
+      .filter(([entityId, state]) => {
+        if (!domains.some((domain) => entityId.startsWith(`${domain}.`))) return false;
+        const name = String(state.attributes?.friendly_name || "").toLowerCase();
+        return !entityId.includes("bluesky_passage")
+          && !name.startsWith("bluesky passage")
+          && state.attributes?.source !== "garmin_mapshare";
+      })
+      .map(([entityId, state]) => {
+        const name = String(state.attributes?.friendly_name || entityId);
+        const searchable = `${entityId} ${name}`.toLowerCase();
+        let score = pattern.test(searchable) ? 20 : 0;
+        if (/inreach|garmin|mapshare/.test(searchable)) score += 6;
+        if (entityId.startsWith("device_tracker.") && finite(state.attributes?.latitude) && finite(state.attributes?.longitude)) score += 10;
+        return { entityId, name, score };
+      })
+      .sort((first, second) => second.score - first.score || first.name.localeCompare(second.name));
+  }
+
+  _recorderEntitySelect(label, id, key, domains, pattern, required = false) {
+    const candidates = this._recorderCandidates(domains, pattern);
+    if (!(key in this._recorderSelections)) {
+      this._recorderSelections[key] = candidates[0]?.score > 0 ? candidates[0].entityId : "";
+    }
+    const selected = this._recorderSelections[key] || "";
+    return `<label>${esc(label)}<select id="${id}"><option value="">${required ? "Select an entity" : "Not used"}</option>${candidates.map((item) => `<option value="${esc(item.entityId)}" ${selected === item.entityId ? "selected" : ""}>${esc(item.name)} · ${esc(item.entityId)}</option>`).join("")}</select></label>`;
+  }
+
+  _recorderRecoveryHtml() {
+    const start = this._recorderStart || this._dateInput(new Date(Date.now() - 10 * 86400000));
+    const end = this._recorderEnd || this._dateInput(new Date());
+    const preview = this._recorderPreview;
+    return `<details class="card" style="margin-top:14px" ${preview ? "open" : ""}><summary><strong>Legacy Home Assistant Recorder recovery (fallback)</strong></summary>
+      <p class="muted">Use this only if the Garmin backfill preview cannot reproduce v1 history that is still visible in Home Assistant History. It reads selected entities through Home Assistant's authenticated history API, previews duplicates, and writes a separate rollbackable source batch. Recorder itself is never changed.</p>
+      <div class="form-grid"><label>Start date<input id="recorder-start" type="date" value="${esc(start)}"></label><label>End date<input id="recorder-end" type="date" value="${esc(end)}"></label>
+      ${this._recorderEntitySelect("Position entity (required)", "recorder-tracker", "tracker", ["device_tracker"], /inreach|position|tracker|mapshare/, true)}
+      ${this._recorderEntitySelect("Report-time sensor", "recorder-time", "time", ["sensor"], /last.?updated|last.?report|timestamp|report.?time/)}
+      ${this._recorderEntitySelect("Velocity / SOG sensor", "recorder-speed", "speed", ["sensor"], /velocity|speed.?over.?ground|\bsog\b/)}
+      ${this._recorderEntitySelect("Course / COG sensor", "recorder-course", "course", ["sensor"], /course|course.?over.?ground|\bcog\b/)}
+      ${this._recorderEntitySelect("Elevation sensor", "recorder-elevation", "elevation", ["sensor"], /elevation|altitude/)}
+      ${this._recorderEntitySelect("Valid GPS sensor", "recorder-gps", "gps", ["binary_sensor"], /valid.?gps|gps.?fix/)}
+      ${this._recorderEntitySelect("Emergency sensor", "recorder-emergency", "emergency", ["binary_sensor"], /emergency|\bsos\b/)}
+      ${this._recorderEntitySelect("Last-text sensor", "recorder-text", "text", ["sensor"], /last.?text|message/)}
+      </div><div class="row"><button class="button" data-action="recorder-preview" ${this._busy ? "disabled" : ""}>${this._busy || "Preview Recorder recovery"}</button></div>
+      ${preview ? `<div class="coverage ${preview.rejected ? "warning" : ""}"><strong>Recorder preview</strong><p>${Number(preview.returned || 0).toLocaleString()} reconstructed rows · ${Number(preview.new || 0).toLocaleString()} new · ${Number(preview.duplicated || 0).toLocaleString()} already archived · ${Number(preview.rejected || 0).toLocaleString()} rejected</p><p>First ${local(preview.first_recorded_at_utc)} · last ${local(preview.last_recorded_at_utc)}</p><p class="muted">This is best-effort reconstruction from entity state history. Review the imported track afterward; optional values remain blank when no nearby source state exists.</p>${preview.new ? `<button class="button primary" data-action="recorder-import">Import previewed Recorder rows</button>` : ""}</div>` : ""}</details>`;
+  }
+
+  _captureRecorderSelections() {
+    const fields = { tracker:"recorder-tracker", time:"recorder-time", speed:"recorder-speed", course:"recorder-course", elevation:"recorder-elevation", gps:"recorder-gps", emergency:"recorder-emergency", text:"recorder-text" };
+    for (const [key, id] of Object.entries(fields)) this._recorderSelections[key] = this.shadowRoot.getElementById(id)?.value || "";
+    this._recorderStart = this.shadowRoot.getElementById("recorder-start")?.value || "";
+    this._recorderEnd = this.shadowRoot.getElementById("recorder-end")?.value || "";
+  }
+
+  _historyRows(history, entityId) {
+    let carriedAttributes = {};
+    return (history?.[entityId] || []).map((item) => {
+      if (item.a || item.attributes) carriedAttributes = { ...(item.a || item.attributes) };
+      const rawTime = item.lu ?? item.last_updated ?? item.last_changed;
+      const timeMs = typeof rawTime === "number" ? rawTime * (rawTime < 1e12 ? 1000 : 1) : new Date(rawTime).getTime();
+      return { state: item.s ?? item.state, attributes: { ...carriedAttributes }, timeMs };
+    }).filter((item) => Number.isFinite(item.timeMs)).sort((first, second) => first.timeMs - second.timeMs);
+  }
+
+  _stateAt(rows, timeMs, maxAgeMinutes = null) {
+    let previous = null; let following = null;
+    for (const row of rows) {
+      if (row.timeMs <= timeMs) previous = row;
+      else { following = row; break; }
+    }
+    if (previous && (maxAgeMinutes == null || timeMs - previous.timeMs <= maxAgeMinutes * 60000)) return { ...previous, deltaMs: timeMs - previous.timeMs };
+    if (following && following.timeMs - timeMs <= Math.min(maxAgeMinutes ?? 2, 2) * 60000) return { ...following, deltaMs: following.timeMs - timeMs };
+    return null;
+  }
+
+  _historyNumber(row, entityId, kind) {
+    if (!row || !finite(row.state)) return null;
+    let value = Number(row.state);
+    const unit = String(row.attributes?.unit_of_measurement || this._hass.states?.[entityId]?.attributes?.unit_of_measurement || "").toLowerCase();
+    if (kind === "speed") {
+      if (/km\/h|kph/.test(unit)) value /= 1.852;
+      else if (/mph/.test(unit)) value /= 1.150779448;
+      else if (/m\/s/.test(unit)) value *= 1.943844492;
+    }
+    if (kind === "elevation" && /ft|feet/.test(unit)) value *= 0.3048;
+    return Number.isFinite(value) ? value : null;
+  }
+
+  _historyBoolean(row) {
+    if (!row) return null;
+    const value = String(row.state ?? "").toLowerCase();
+    if (["on","true","yes","valid","1","connected"].includes(value)) return true;
+    if (["off","false","no","invalid","0","disconnected"].includes(value)) return false;
+    return null;
+  }
+
+  _recorderRecordsFromHistory(history, startMs) {
+    const selected = this._recorderSelections;
+    const trackerRows = this._historyRows(history, selected.tracker);
+    const rows = Object.fromEntries(Object.entries(selected).filter(([key, entityId]) => key !== "tracker" && entityId).map(([key, entityId]) => [key, this._historyRows(history, entityId)]));
+    const deviceName = this._hass.states?.[selected.tracker]?.attributes?.friendly_name || "Legacy Home Assistant tracker";
+    const unique = new Map();
+    for (const tracker of trackerRows) {
+      const latitude = Number(tracker.attributes?.latitude); const longitude = Number(tracker.attributes?.longitude);
+      if (!finite(latitude) || !finite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) continue;
+      let recordedMs = tracker.timeMs;
+      const timeState = this._stateAt(rows.time || [], tracker.timeMs, 20);
+      const sourceTime = timeState ? new Date(String(timeState.state)).getTime() : NaN;
+      if (Number.isFinite(sourceTime) && Math.abs(sourceTime - tracker.timeMs) <= 30 * 60000) recordedMs = sourceTime;
+      else {
+        const attributeTime = new Date(tracker.attributes?.recorded_at_utc || "").getTime();
+        if (Number.isFinite(attributeTime) && Math.abs(attributeTime - tracker.timeMs) <= 30 * 60000) recordedMs = attributeTime;
       }
+      if (tracker.timeMs <= startMs + 1000 && recordedMs === tracker.timeMs) continue;
+      const recordedAt = new Date(recordedMs).toISOString();
+      const speedRow = this._stateAt(rows.speed || [], tracker.timeMs, 20);
+      const courseRow = this._stateAt(rows.course || [], tracker.timeMs, 20);
+      const elevationRow = this._stateAt(rows.elevation || [], tracker.timeMs, 20);
+      const gpsRow = this._stateAt(rows.gps || [], tracker.timeMs);
+      const emergencyRow = this._stateAt(rows.emergency || [], tracker.timeMs);
+      const textRow = this._stateAt(rows.text || [], tracker.timeMs, 2);
+      const textValue = textRow && !["unknown","unavailable","none",""]
+        .includes(String(textRow.state ?? "").trim().toLowerCase()) ? String(textRow.state) : null;
+      const record = {
+        timestamp: recordedAt, latitude, longitude,
+        source_event_id: `recorder:${selected.tracker}:${recordedAt}:${latitude.toFixed(5)}:${longitude.toFixed(5)}`,
+        device_name: deviceName,
+        sog_kn: this._historyNumber(speedRow, selected.speed, "speed"),
+        cog_true: this._historyNumber(courseRow, selected.course, "course"),
+        elevation: this._historyNumber(elevationRow, selected.elevation, "elevation"),
+        valid_gps_fix: this._historyBoolean(gpsRow),
+        in_emergency: this._historyBoolean(emergencyRow),
+        message_text: textValue,
+      };
+      unique.set(record.source_event_id, record);
     }
-    this.shadowRoot.getElementById("tiles").innerHTML = tiles.join("");
-
-    const points = this._query.points || [];
-    const paths = [];
-    for (const source of [...new Set(points.map((point) => point.display_track || point.source))]) {
-      let path = "";
-      let hasSegment = false;
-      points.forEach((point) => {
-        if ((point.display_track || point.source) !== source || point.latitude == null || point.longitude == null) return;
-        const pixel = this._screen(point.latitude, point.longitude, width, height);
-        const command = !hasSegment || point.break_before ? "M" : "L";
-        path += `${command}${pixel.x.toFixed(1)},${pixel.y.toFixed(1)} `;
-        hasSegment = true;
-      });
-      if (path) paths.push(`<path d="${path}" fill="none" stroke="${SOURCE_COLORS[source] || "#78909c"}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>`);
-    }
-    const route = this._state.planned_route?.coordinates || [];
-    if (route.length > 1) {
-      const routePath = route.map((coordinate, index) => {
-        const pixel = this._screen(coordinate[1], coordinate[0], width, height);
-        return `${index ? "L" : "M"}${pixel.x.toFixed(1)},${pixel.y.toFixed(1)}`;
-      }).join(" ");
-      paths.push(`<path d="${routePath}" fill="none" stroke="#66bb6a" stroke-width="3" stroke-dasharray="9 5"/>`);
-    }
-    const destination = this._state.destination;
-    if (destination) {
-      const valid = points.filter((point) => point.latitude != null && point.longitude != null && point.source === "garmin_mapshare");
-      const startPoint = this._state.start_point || valid[0];
-      if (startPoint?.latitude != null && startPoint?.longitude != null) {
-        const first = this._screen(startPoint.latitude, startPoint.longitude, width, height);
-        const dest = this._screen(destination.latitude, destination.longitude, width, height);
-        paths.push(`<path d="M${first.x.toFixed(1)},${first.y.toFixed(1)} L${dest.x.toFixed(1)},${dest.y.toFixed(1)}" fill="none" stroke="#ffd54f" stroke-width="2" stroke-dasharray="4 7"><title>Direct Reference—Not a Navigational Route</title></path>`);
-        paths.push(`<path d="M${dest.x},${dest.y-10} L${dest.x+10},${dest.y} L${dest.x},${dest.y+10} L${dest.x-10},${dest.y} Z" fill="#ffd54f" stroke="#111" stroke-width="2"><title>${esc(destination.name)}</title></path>`);
-      }
-    }
-    const markers = points.map((point, index) => {
-      if (point.latitude == null || point.longitude == null) return "";
-      const pixel = this._screen(point.latitude, point.longitude, width, height);
-      if (pixel.x < -10 || pixel.x > width + 10 || pixel.y < -10 || pixel.y > height + 10) return "";
-      const selected = index === this._selectedIndex;
-      return `<circle class="track-point" data-index="${index}" cx="${pixel.x.toFixed(1)}" cy="${pixel.y.toFixed(1)}" r="${selected ? 7 : 3.5}" fill="${SOURCE_COLORS[point.source] || "#78909c"}" stroke="${selected ? "white" : "#102027"}" stroke-width="${selected ? 2 : 1}" tabindex="0"><title>${esc(localTime(point.recorded_at_utc))}</title></circle>`;
-    }).join("");
-    const overlay = this.shadowRoot.getElementById("overlay");
-    overlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
-    overlay.innerHTML = paths.join("") + markers;
-    overlay.querySelectorAll(".track-point").forEach((marker) => {
-      const choose = (event) => { event.stopPropagation(); this._selectedIndex = Number(marker.dataset.index); this._renderDetail(); this._renderMap(); };
-      marker.addEventListener("click", choose);
-      marker.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") choose(event); });
-    });
-    const sources = [...new Set(points.map((point) => point.source))];
-    this.shadowRoot.getElementById("legend").innerHTML = sources.map((source) => `<span><i class="dot" style="background:${SOURCE_COLORS[source] || "#78909c"}"></i>${esc(source)}</span>`).join("") + (destination ? `<span><i class="dot" style="background:#ffd54f"></i>Direct reference</span>` : "") + (route.length ? `<span><i class="dot" style="background:#66bb6a"></i>Planned route</span>` : "");
+    return [...unique.values()].sort((first, second) => first.timestamp.localeCompare(second.timestamp));
   }
 
-  _fitMap() {
-    const coordinates = (this._query.points || [])
-      .filter((point) => point.latitude != null && point.longitude != null)
-      .map((point) => [Number(point.latitude), Number(point.longitude)]);
-    if (this._state?.destination) coordinates.push([Number(this._state.destination.latitude), Number(this._state.destination.longitude)]);
-    if (this._state?.start_point?.latitude != null && this._state?.start_point?.longitude != null) coordinates.push([Number(this._state.start_point.latitude), Number(this._state.start_point.longitude)]);
-    for (const coordinate of this._state?.planned_route?.coordinates || []) coordinates.push([Number(coordinate[1]), Number(coordinate[0])]);
-    if (!coordinates.length) return;
-    const map = this.shadowRoot.getElementById("map");
-    const minLat = Math.min(...coordinates.map((item) => item[0]));
-    const maxLat = Math.max(...coordinates.map((item) => item[0]));
-    const wrapped = coordinates.map((item) => ((item[1] % 360) + 360) % 360).sort((a,b) => a-b);
-    let largestGap = -1, gapIndex = 0;
-    wrapped.forEach((longitude, index) => {
-      const next = index === wrapped.length - 1 ? wrapped[0] + 360 : wrapped[index + 1];
-      if (next - longitude > largestGap) { largestGap = next - longitude; gapIndex = index; }
-    });
-    const arcStart = wrapped[(gapIndex + 1) % wrapped.length];
-    const unwrapped = wrapped.map((longitude) => longitude < arcStart ? longitude + 360 : longitude);
-    const lonSpan = Math.max(...unwrapped) - Math.min(...unwrapped);
-    let centerLon = (Math.min(...unwrapped) + Math.max(...unwrapped)) / 2;
-    if (centerLon > 180) centerLon -= 360;
-    this._center = { lat: (minLat + maxLat) / 2, lon: centerLon };
-    for (let zoom = 16; zoom >= 1; zoom -= 1) {
-      const a = this._project(maxLat, centerLon, zoom);
-      const b = this._project(minLat, centerLon, zoom);
-      const xSpan = 256 * 2 ** zoom * lonSpan / 360;
-      if (xSpan <= map.clientWidth * .82 && Math.abs(b.y - a.y) <= map.clientHeight * .78) {
-        this._zoom = zoom;
-        break;
-      }
-    }
-  }
-
-  _mapPointerDown(event) {
-    if (event.target.classList?.contains("track-point")) return;
-    const center = this._project(this._center.lat, this._center.lon);
-    this._drag = { x: event.clientX, y: event.clientY, centerX: center.x, centerY: center.y, moved: false };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  _mapPointerMove(event) {
-    if (!this._drag) return;
-    const dx = event.clientX - this._drag.x, dy = event.clientY - this._drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 5) this._drag.moved = true;
-    const center = this._unproject(this._drag.centerX - dx, this._drag.centerY - dy);
-    center.lon = ((center.lon + 540) % 360) - 180;
-    this._center = center;
-    this._renderMap();
-  }
-
-  _mapPointerUp(event) {
-    if (!this._drag) return;
-    const moved = this._drag.moved;
-    this._drag = null;
-    if (!moved && this._choosingDestination) {
-      const rect = this.shadowRoot.getElementById("map").getBoundingClientRect();
-      const center = this._project(this._center.lat, this._center.lon);
-      const worldX = center.x + event.clientX - rect.left - rect.width / 2;
-      const worldY = center.y + event.clientY - rect.top - rect.height / 2;
-      const coordinate = this._unproject(worldX, worldY);
-      const latInput = this.shadowRoot.getElementById("destination-latitude");
-      const lonInput = this.shadowRoot.getElementById("destination-longitude");
-      if (latInput && lonInput) {
-        latInput.value = coordinate.lat.toFixed(6);
-        lonInput.value = coordinate.lon.toFixed(6);
-      }
-      this._choosingDestination = false;
-      this.shadowRoot.getElementById("map-hint").classList.remove("show");
-      this._showNotice("Destination coordinates filled from the map. Review the exact point and select Save/Start to commit it.");
-    }
-  }
-
-  _selectRelative(change) {
-    const next = this._selectedIndex + change;
-    if (next >= 0 && next < (this._query.points || []).length) {
-      this._selectedIndex = next;
-      const point = this._query.points[next];
-      if (point.latitude != null && point.longitude != null) this._center = { lat: point.latitude, lon: point.longitude };
-      this._renderDetail(); this._renderMap();
-    }
-  }
-
-  async _copySelected() {
-    const point = (this._query.points || [])[this._selectedIndex];
-    if (!point || point.latitude == null || point.longitude == null) return;
-    const text = `${point.latitude}, ${point.longitude}`;
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      textarea.remove();
-    }
-    this._showNotice("Coordinates copied.");
-  }
-
-  _destinationFromForm(optional = false) {
-    const name = this.shadowRoot.getElementById("destination-name")?.value.trim();
-    const latitude = Number(this.shadowRoot.getElementById("destination-latitude")?.value);
-    const longitude = Number(this.shadowRoot.getElementById("destination-longitude")?.value);
-    const radius = Number(this.shadowRoot.getElementById("arrival-radius")?.value || 2);
-    const blankCoordinates = !this.shadowRoot.getElementById("destination-latitude")?.value && !this.shadowRoot.getElementById("destination-longitude")?.value;
-    if (optional && !name && blankCoordinates) return null;
-    if (!name || !Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new Error("Destination name, latitude, and longitude are all required when setting a destination.");
-    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) throw new Error("Destination coordinates are outside the valid range.");
-    if (!Number.isFinite(radius) || radius < .1 || radius > 100) throw new Error("Arrival radius must be between 0.1 and 100 nmi.");
-    return { name, latitude, longitude, arrival_radius_nm: radius };
-  }
-
-  async _startPassage() {
+  async _previewRecorder() {
     try {
-      const name = this.shadowRoot.getElementById("passage-name").value.trim();
-      const localStart = this.shadowRoot.getElementById("passage-start").value;
-      if (!name || !localStart) throw new Error("Passage name and start time are required.");
-      const destination = this._destinationFromForm(true);
-      await this._call("start_passage", { name, started_at_utc: new Date(localStart).toISOString(), ...(destination ? { destination } : {}) });
-      await this._load(true);
-      this._showNotice("Passage started. Live points continue in the global archive and are now evaluated against this passage.");
-    } catch (error) { this._showNotice(error.message || String(error), true); }
+      this._captureRecorderSelections();
+      if (!this._recorderSelections.tracker) throw new Error("Select the legacy position entity first.");
+      if (!this._recorderStart || !this._recorderEnd) throw new Error("Choose both Recorder dates.");
+      const start = new Date(`${this._recorderStart}T00:00:00`); const end = new Date(`${this._recorderEnd}T23:59:59.999`);
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) throw new Error("Recorder end date must be after the start date.");
+      if (end - start > 31 * 86400000) throw new Error("Preview at most 31 days at a time to keep Home Assistant responsive.");
+      const entityIds = [...new Set(Object.values(this._recorderSelections).filter(Boolean))];
+      this._busy = "Reading Recorder history…"; this._show("Reading the selected Home Assistant history without modifying Recorder…"); this._renderContent();
+      const history = await this._hass.callWS({ type:"history/history_during_period", start_time:start.toISOString(), end_time:end.toISOString(), entity_ids:entityIds, minimal_response:false, no_attributes:false, significant_changes_only:false });
+      const records = this._recorderRecordsFromHistory(history, start.getTime());
+      if (!records.length) throw new Error("No timestamped positions were reconstructed. Check the entity and Recorder date range.");
+      if (records.length > 10000) throw new Error("More than 10,000 positions were reconstructed. Choose a shorter date range.");
+      const preview = await this._call("import_preview", { source:"ha_recorder", records });
+      this._recorderRecords = records;
+      this._recorderPreview = { ...preview, start_utc:start.toISOString(), end_utc:end.toISOString() };
+      this._show("Recorder preview complete. Review the counts before importing."); this._renderContent();
+    } catch (error) { this._show(error.message || String(error), true); }
+    finally { this._busy = ""; this._renderContent(); }
   }
 
-  async _setDestination() {
+  async _importRecorder() {
+    if (!this._recorderPreview || !this._recorderRecords.length) return;
+    if (!confirm("Import exactly the previewed Recorder rows? The resulting batch can be rolled back.")) return;
+    let importId = null;
     try {
-      const destination = this._destinationFromForm(false);
-      await this._call("set_destination", { passage_id: this._state.passage.id, destination });
-      await this._load(true);
-      this._showNotice("A new destination version was saved; prior versions remain in the archive.");
-    } catch (error) { this._showNotice(error.message || String(error), true); }
+      const serialized = JSON.stringify(this._recorderRecords);
+      const sha256 = await this._sha256(new TextEncoder().encode(serialized));
+      const filename = `Home Assistant Recorder ${this._recorderPreview.start_utc.slice(0,10)} to ${this._recorderPreview.end_utc.slice(0,10)}`;
+      importId = (await this._call("import_begin", { source:"ha_recorder", filename, sha256 })).import_id;
+      for (let offset = 0; offset < this._recorderRecords.length; offset += 500) await this._call("import_chunk", { import_id:importId, source:"ha_recorder", records:this._recorderRecords.slice(offset, offset + 500) });
+      await this._call("import_finish", { import_id:importId });
+      const inserted = this._recorderPreview.new;
+      this._recorderPreview = null; this._recorderRecords = [];
+      await this._load(false); this._show(`Recorder recovery imported ${Number(inserted).toLocaleString()} new rows. Inspect the recovered track before retiring v1.`);
+    } catch (error) {
+      if (importId != null) { try { await this._call("import_finish", { import_id:importId, failed:true, notes:String(error).slice(0,900) }); } catch (_ignored) {} }
+      this._show(error.message || String(error), true);
+    }
   }
 
-  _chooseDestination() {
-    this._choosingDestination = true;
-    this.shadowRoot.getElementById("map-hint").classList.add("show");
-    this.shadowRoot.getElementById("map").scrollIntoView({ behavior: "smooth", block: "center" });
+  _profileField(label, key, value, numeric = false) { return `<label>${esc(label)}<input id="profile-${key}" ${numeric ? 'type="number" step="any" min="0"' : ""} value="${esc(value ?? "")}"></label>`; }
+
+  async _saveProfile() {
+    try {
+      const keys = ["vessel_name","hull_configuration","length_overall_ft","waterline_length_ft","beam_ft","draft_ft","displacement_lb","sail_area_sqft","engine_cruise_speed_kn","observed_cruise_speed_kn","max_comfortable_wave_m"];
+      const profile = {}; for (const key of keys) { const value = this.shadowRoot.getElementById(`profile-${key}`).value.trim(); if (value !== "") profile[key] = ["vessel_name","hull_configuration"].includes(key) ? value : Number(value); }
+      const polar = this.shadowRoot.getElementById("profile-polar").value.trim(); if (polar) { profile.polar_table = JSON.parse(polar); if (!Array.isArray(profile.polar_table)) throw new Error("Polar table JSON must be an array."); }
+      const passage = this.shadowRoot.getElementById("profile-passage").value;
+      const result = await this._call("profile_save", { profile, ...(passage ? { passage_id: Number(passage) } : {}) }); await this._load(false); this._show(result.route_recalculated ? "Profile saved and the selected passage comparison was recalculated." : "Vessel profile saved.");
+    } catch (error) { this._show(error.message || String(error), true); }
   }
 
-  _useSavedDestination(id) {
-    const destination = (this._state.destinations || []).find((item) => String(item.id) === String(id));
-    if (!destination) return;
-    this.shadowRoot.getElementById("destination-name").value = destination.name;
-    this.shadowRoot.getElementById("destination-latitude").value = destination.latitude;
-    this.shadowRoot.getElementById("destination-longitude").value = destination.longitude;
+  async _startBackfillPreview() {
+    try { const start = this.shadowRoot.getElementById("backfill-start").value; const end = this.shadowRoot.getElementById("backfill-end").value; if (!start || !end) throw new Error("Choose both backfill dates."); const startUtc = new Date(`${start}T00:00:00`).toISOString(); const endUtc = new Date(`${end}T23:59:59.999`).toISOString(); this._backfillJob = await this._call("backfill_preview", { start_utc:startUtc, end_utc:endUtc }); this._renderContent(); await this._runBackfill(this._backfillJob.id); } catch (error) { this._show(error.message || String(error), true); }
   }
+  async _startBackfillCommit(id) { if (!confirm("Import the previewed Garmin range? The batch can be rolled back later.")) return; try { this._backfillJob = await this._call("backfill_commit", { preview_job_id: id }); this._renderContent(); await this._runBackfill(this._backfillJob.id); } catch (error) { this._show(error.message || String(error), true); } }
+  async _runBackfill(id, resume = false) { try { if (resume) { this._backfillJob = await this._call("backfill_step", { job_id:id }); this._renderContent(); } while (!["completed","failed","cancelled"].includes(this._backfillJob.status)) { this._backfillJob = await this._call("backfill_step", { job_id: id }); this._renderContent(); await new Promise((resolve) => setTimeout(resolve, 350)); } await this._load(false); this._show(this._backfillJob.phase === "preview" ? "Backfill preview complete. Review counts before importing." : "Garmin historical import complete."); } catch (error) { this._show(error.message || String(error), true); await this._load(false); } }
+  async _cancelBackfill(id) { if (!confirm("Cancel this backfill job? Completed chunks and any already imported rows remain in the rollbackable batch.")) return; try { this._backfillJob = await this._call("backfill_cancel", { job_id:id }); await this._load(false); this._show("Backfill job cancelled."); } catch (error) { this._show(error.message || String(error), true); } }
 
-  async _endPassage() {
-    if (!confirm("End this passage? It remains available as completed history and live global archiving continues.")) return;
-    try { await this._call("end_passage", { passage_id: this._state.passage.id }); await this._load(false); this._showNotice("Passage ended. Live global archiving continues."); }
-    catch (error) { this._showNotice(error.message || String(error), true); }
-  }
-
-  async _deletePassage(id) {
-    if (!confirm("Delete this completed passage's metadata? Global track records are retained.")) return;
-    try { await this._call("delete_passage", { passage_id: id }); await this._load(false); }
-    catch (error) { this._showNotice(error.message || String(error), true); }
-  }
-
-  async _testNotification() {
-    try { await this._call("test_notification"); this._showNotice("Test sent. Open Home Assistant Notifications now and confirm it arrived."); }
-    catch (error) { this._showNotice(error.message || String(error), true); }
-  }
+  async _weather() { try { this._busy = "Fetching model data…"; this._show("Fetching and caching representative model conditions…"); this._renderContent(); const payload = { range: this._range, ...(this._passageId ? { passage_id: this._passageId } : {}), ...this._customRange() }; if (this._selectionStart && this._selectionEnd) Object.assign(payload, { start_report_id: this._selectionStart, end_report_id: this._selectionEnd }); const result = await this._call("weather_enrich", payload); await this._loadQuery(false); const warning = result.warnings?.length ? ` ${result.warnings[0]}` : ""; this._show(`Stored model data for ${result.available} of ${result.requested} representative positions. Missing fields remain gaps.${warning}`, result.available === 0); } catch (error) { this._show(error.message || String(error), true); } finally { this._busy = ""; this._renderContent(); } }
+  async _refresh() { try { this._busy = "Refreshing Garmin…"; this._show("Requesting the latest rolling Garmin window…"); this._renderContent(); await this._call("refresh"); await this._load(false); this._show("Garmin refresh completed."); } catch (error) { this._show(error.message || String(error), true); } finally { this._busy = ""; this._renderContent(); } }
+  async _integrity() { try { const result = await this._call("integrity"); await this._load(false); this._show(`Archive integrity: ${result.integrity}.`); } catch (error) { this._show(error.message || String(error), true); } }
+  async _testNotification() { try { await this._call("test_notification"); this._show("Test notification sent. Confirm it in Home Assistant Notifications."); } catch (error) { this._show(error.message || String(error), true); } }
 
   async _export() {
-    try {
-      const format = this.shadowRoot.getElementById("export-format").value;
-      this._setBusy(true, "Preparing authenticated export…");
-      const result = await this._call("export", { format, range: this._range, source: this._source, ...this._customRange() });
-      const blob = new Blob([result.content], { type: result.mime_type });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url; anchor.download = result.filename; anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      this._showNotice(result.decimated ? `Exported ${result.returned} of ${result.total_matching} matching records. Narrow the range for a complete export.` : `Exported ${result.returned} records.`);
-    } catch (error) { this._showNotice(error.message || String(error), true); }
-    finally { this._setBusy(false); }
+    try { const payload = { format: "csv", range: this._range, source: this._source, ...this._customRange() }; if (this._passageId) payload.passage_id = this._passageId; if (this._selectionStart && this._selectionEnd) Object.assign(payload, { start_report_id: this._selectionStart, end_report_id: this._selectionEnd }); const result = await this._call("export", payload); const url = URL.createObjectURL(new Blob([result.content], { type: result.mime_type })); const link = document.createElement("a"); link.href = url; link.download = result.filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); this._show(`Exported ${result.returned.toLocaleString()} records.`); } catch (error) { this._show(error.message || String(error), true); }
   }
 
   async _importHistory() {
-    const input = this.shadowRoot.getElementById("history-file");
-    const file = input.files?.[0];
-    if (!file) { this._showNotice("Choose a historical track file first.", true); return; }
-    if (!confirm(`Import ${file.name} into the separate source-labelled archive?`)) return;
-    const progress = this.shadowRoot.getElementById("import-progress");
+    const file = this.shadowRoot.getElementById("history-file")?.files?.[0]; if (!file) { this._show("Choose a file first.", true); return; }
     let importId = null;
-    try {
-      const buffer = await file.arrayBuffer();
-      const sha256 = await this._sha256(buffer);
-      const source = this.shadowRoot.getElementById("history-source").value;
-      const records = this._parseHistoryFile(file.name, new TextDecoder().decode(buffer));
-      if (!records.length) throw new Error("No timestamped position records were found in this file.");
-      const begun = await this._call("import_begin", { source, filename: file.name, sha256 });
-      importId = begun.import_id;
-      let inserted = 0, rejected = 0;
-      for (let offset = 0; offset < records.length; offset += 500) {
-        const result = await this._call("import_chunk", { import_id: importId, source, records: records.slice(offset, offset + 500) });
-        inserted += result.inserted; rejected += result.rejected;
-        progress.textContent = `Processed ${Math.min(offset + 500, records.length).toLocaleString()} / ${records.length.toLocaleString()}…`;
-      }
-      await this._call("import_finish", { import_id: importId, notes: `${inserted} inserted; ${rejected} rejected before archive validation` });
-      progress.textContent = `Import complete: ${inserted.toLocaleString()} new records; ${rejected.toLocaleString()} rejected. Exact duplicates were ignored.`;
-      await this._load(true);
-    } catch (error) {
-      if (importId != null) {
-        try { await this._call("import_finish", { import_id: importId, failed: true, notes: String(error.message || error).slice(0, 900) }); } catch (_ignored) {}
-      }
-      this._showNotice(error.message || String(error), true);
+    try { const text = await file.text(); const source = this.shadowRoot.getElementById("history-source").value; const records = /\.gpx$|\.xml$/i.test(file.name) ? this._parseGpx(text) : this._parseJson(text); if (!records.length) throw new Error("No timestamped position rows were found."); const sha256 = await this._sha256(new TextEncoder().encode(text)); importId = (await this._call("import_begin", { source, filename: file.name, sha256 })).import_id; for (let offset = 0; offset < records.length; offset += 500) await this._call("import_chunk", { import_id: importId, source, records: records.slice(offset, offset+500) }); await this._call("import_finish", { import_id: importId }); await this._load(false); this._show("Source-labelled import complete."); }
+    catch (error) { if (importId != null) { try { await this._call("import_finish", { import_id: importId, failed: true, notes: String(error).slice(0,900) }); } catch (_ignored) {} } this._show(error.message || String(error), true); }
+  }
+  _parseJson(text) { const value = JSON.parse(text); if (Array.isArray(value)) return value; if (value?.type === "FeatureCollection") return value.features || []; for (const item of Object.values(value || {})) if (Array.isArray(item)) return item; return []; }
+  _parseGpx(text) { const xml = new DOMParser().parseFromString(text, "application/xml"); if (xml.querySelector("parsererror")) throw new Error("GPX/XML is malformed."); return [...xml.getElementsByTagNameNS("*", "trkpt")].map((node, index) => ({ id: `gpx-${index}`, latitude: Number(node.getAttribute("lat")), longitude: Number(node.getAttribute("lon")), elevation: node.getElementsByTagNameNS("*", "ele")[0]?.textContent, timestamp: node.getElementsByTagNameNS("*", "time")[0]?.textContent })).filter((item) => item.timestamp && finite(item.latitude) && finite(item.longitude)); }
+  async _rollbackImport(id) { if (!confirm("Rollback this import batch? Only rows inserted by this batch are removed.")) return; try { const result = await this._call("import_rollback", { import_id: id }); await this._load(false); this._show(`Rolled back ${result.removed} imported rows.`); } catch (error) { this._show(error.message || String(error), true); } }
+
+  async _selectPoint(index) {
+    const point = this._query.points[index]; if (!point) return;
+    this._selectedIndex = index;
+    if (this._selectRange) {
+      if (!this._selectionStart || this._selectionEnd) { this._selectionStart = point.id; this._selectionEnd = null; this._show(`First report selected: ${local(point.recorded_at_utc)}. Choose the other boundary.`); }
+      else { const first = this._query.points.find((item) => item.id === this._selectionStart); this._selectionEnd = point.id; this._selectRange = false; await this._loadQuery(true); this._show(`Map range selected between ${local(first?.recorded_at_utc)} and ${local(point.recorded_at_utc)} · ${Number(this._query.returned || 0).toLocaleString()} reports.`); return; }
     }
+    this._renderContent();
+  }
+  async _clearPointRange() { this._selectionStart = null; this._selectionEnd = null; this._selectRange = false; await this._loadQuery(true); }
+
+  _drawMap(id, route = null) {
+    const map = this.shadowRoot.getElementById(id); if (!map) return;
+    const points = (this._query.points || []).filter((item) => finite(item.latitude) && finite(item.longitude));
+    const routeCoordinates = route?.coordinates || [];
+    const all = [...points.map((p) => [Number(p.latitude), Number(p.longitude)]), ...routeCoordinates.map((p) => [Number(p[1]), Number(p[0])])];
+    if (!all.length) { map.querySelector(".tiles").innerHTML = ""; map.querySelector(".overlay").innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#345">No valid positions in this range</text>`; return; }
+    const width = map.clientWidth || 900, height = map.clientHeight || 500; const view = this._fitView(all, width, height); const zoom = Math.max(1, Math.min(18, view.zoom + this._mapZoomDelta)); const center = this._project(view.lat, view.lon, zoom); const world = 256 * 2 ** zoom;
+    const tiles = []; const left = center.x - width/2, top = center.y - height/2; const minTileX = Math.floor(left/256), maxTileX = Math.floor((left+width)/256), minTileY = Math.floor(top/256), maxTileY = Math.floor((top+height)/256);
+    for (let tx=minTileX; tx<=maxTileX; tx+=1) for (let ty=minTileY; ty<=maxTileY; ty+=1) { if (ty < 0 || ty >= 2**zoom) continue; const wrapped = ((tx % 2**zoom)+2**zoom)%2**zoom; tiles.push(`<img alt="" src="https://tile.openstreetmap.org/${zoom}/${wrapped}/${ty}.png" style="left:${tx*256-left}px;top:${ty*256-top}px">`); }
+    map.querySelector(".tiles").innerHTML = tiles.join(""); const xy = (lat,lon) => { const p=this._project(lat,lon,zoom); let x=p.x-left; if (x < -world/2) x+=world; if (x > width+world/2) x-=world; return [x,p.y-top]; };
+    const segments=[]; let current=[]; points.forEach((p) => { if (p.break_before && current.length) { segments.push(current); current=[]; } current.push(xy(Number(p.latitude),Number(p.longitude))); }); if (current.length) segments.push(current);
+    const tracks = segments.map((segment) => `<polyline points="${segment.map((p)=>p.join(",")).join(" ")}" fill="none" stroke="${COLORS.speed}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
+    const routeLine = routeCoordinates.length ? `<polyline points="${routeCoordinates.map((p)=>xy(Number(p[1]),Number(p[0])).join(",")).join(" ")}" fill="none" stroke="#66bb6a" stroke-width="3" stroke-dasharray="9 6"/>` : "";
+    const dots = points.map((p,pointIndex) => { const index=this._query.points.findIndex((item)=>item.id===p.id); const [x,y]=xy(Number(p.latitude),Number(p.longitude)); const selected=index===this._selectedIndex; const boundary=[this._selectionStart,this._selectionEnd].includes(p.id); const current=pointIndex===points.length-1; const visible=current&&finite(p.cog_true)?`<path d="M0 -11 L7 8 L0 5 L-7 8 Z" transform="translate(${x} ${y}) rotate(${Number(p.cog_true)})" fill="${boundary?"#ffeb3b":COLORS.speed}" stroke="#fff" stroke-width="2"/>`:`<circle cx="${x}" cy="${y}" r="${boundary?9:selected?8:5}" fill="${boundary?"#ffeb3b":COLORS.speed}" stroke="#fff" stroke-width="${selected||boundary?2:1}"/>`; return `<g class="track-point" data-action="point" data-index="${index}" tabindex="0" role="button" aria-label="Report ${esc(local(p.recorded_at_utc))}">${visible}<circle cx="${x}" cy="${y}" r="22" fill="transparent"><title>${esc(local(p.recorded_at_utc))}</title></circle></g>`; }).join("");
+    const arrows = this._mapMode === "weather" ? (this._query.weather_samples || []).filter((s)=>finite(s.wind_dir_deg)).map((s)=>{const [x,y]=xy(Number(s.latitude),Number(s.longitude)); return `<g transform="translate(${x} ${y}) rotate(${Number(s.wind_dir_deg)})"><path d="M0 9 L0 -9 M0 -9 L-4 -3 M0 -9 L4 -3" stroke="${COLORS.wind}" stroke-width="2" fill="none"><title>Modeled wind ${this._speed(s.wind_speed_kn)}</title></path></g>`;}).join("") : "";
+    map.querySelector(".overlay").setAttribute("viewBox",`0 0 ${width} ${height}`); map.querySelector(".overlay").innerHTML = `${tracks}${routeLine}${arrows}${dots}`;
   }
 
-  _parseHistoryFile(filename, text) {
-    if (/\.gpx$|\.xml$/i.test(filename)) return this._parseGpx(text).records;
-    let value;
-    if (/\.html?$/i.test(filename)) {
-      const documentValue = new DOMParser().parseFromString(text, "text/html");
-      const nextData = documentValue.querySelector("script#__NEXT_DATA__")?.textContent;
-      if (!nextData) throw new Error("The HTML snapshot has no __NEXT_DATA__ payload. PredictWind may have changed its page format.");
-      value = JSON.parse(nextData);
-    } else {
-      value = JSON.parse(text);
-    }
-    if (value?.type === "FeatureCollection" && Array.isArray(value.features)) return value.features;
-    if (Array.isArray(value)) return value;
-    const found = this._findRecordArray(value);
-    if (!found.length) throw new Error("No array resembling timestamped route records was found.");
-    return found;
+  _fitView(coordinates, width, height) {
+    if (coordinates.length === 1) return { lat: coordinates[0][0], lon: coordinates[0][1], zoom: 7 };
+    const latMin=Math.min(...coordinates.map((p)=>p[0])),latMax=Math.max(...coordinates.map((p)=>p[0]));
+    const wrapped=coordinates.map((p)=>((p[1]%360)+360)%360).sort((a,b)=>a-b); let gap=-1,gapIndex=0;
+    wrapped.forEach((value,index)=>{const next=index===wrapped.length-1?wrapped[0]+360:wrapped[index+1];if(next-value>gap){gap=next-value;gapIndex=index;}});
+    const arcStart=wrapped[(gapIndex+1)%wrapped.length];const unwrapped=wrapped.map((value)=>value<arcStart?value+360:value);const lonSpan=Math.max(...unwrapped)-Math.min(...unwrapped);let lon=(Math.min(...unwrapped)+Math.max(...unwrapped))/2;if(lon>180)lon-=360;const lat=(latMin+latMax)/2;
+    for(let z=16;z>=1;z-=1){const a=this._project(latMax,lon,z),b=this._project(latMin,lon,z);const xSpan=256*2**z*lonSpan/360;if(xSpan<width*.82&&Math.abs(b.y-a.y)<height*.78)return{lat,lon,zoom:z};} return{lat,lon,zoom:1};
   }
+  _project(lat,lon,zoom){const scale=256*2**zoom;const bounded=Math.max(-85.0511,Math.min(85.0511,lat));const sin=Math.sin(bounded*Math.PI/180);return{x:(lon+180)/360*scale,y:(.5-Math.log((1+sin)/(1-sin))/(4*Math.PI))*scale};}
 
-  _findRecordArray(root) {
-    let best = [];
-    const queue = [{ value: root, depth: 0 }];
-    const seen = new Set();
-    while (queue.length) {
-      const { value, depth } = queue.shift();
-      if (!value || typeof value !== "object" || seen.has(value) || depth > 12) continue;
-      seen.add(value);
-      if (Array.isArray(value)) {
-        const sample = value.find((item) => item && typeof item === "object" && !Array.isArray(item));
-        if (sample) {
-          const hasTime = ["t", "time", "timestamp", "recorded_at_utc", "Time UTC"].some((key) => key in sample);
-          const hasPosition = "p" in sample || "latitude" in sample || "lat" in sample || sample.type === "Feature";
-          if (hasTime && hasPosition && value.length > best.length) best = value;
-        }
-        value.slice(0, 30).forEach((item) => queue.push({ value: item, depth: depth + 1 }));
-      } else {
-        Object.values(value).forEach((item) => queue.push({ value: item, depth: depth + 1 }));
-      }
-    }
-    return best;
-  }
+  _speedValue(value) { if (!finite(value)) return null; const knots=Number(value); return this._speedUnit === "km/h" ? knots*1.852 : this._speedUnit === "mph" ? knots*1.150779 : knots; }
+  _heightValue(value) { if (!finite(value)) return null; return this._heightUnit === "ft" ? Number(value)*3.28084 : Number(value); }
+  _speed(value) { const converted=this._speedValue(value); return converted == null ? "—" : `${converted.toFixed(1)} ${this._speedUnit}`; }
+  _height(value) { const converted=this._heightValue(value); return converted == null ? "—" : `${converted.toFixed(1)} ${this._heightUnit}`; }
+  _sourceLabel(value) { return ({garmin_mapshare:"Garmin MapShare",predictwind_snapshot:"PredictWind import",gpx_import:"GPX import",ha_recorder:"Home Assistant Recorder import",csv_import:"CSV import",canonical:"Combined track"})[value] || value || "—"; }
 
-  _parseGpx(text) {
-    const xml = new DOMParser().parseFromString(text, "application/xml");
-    if (xml.querySelector("parsererror")) throw new Error("The GPX/XML file is malformed.");
-    let nodes = [...xml.getElementsByTagNameNS("*", "trkpt")];
-    if (!nodes.length) nodes = [...xml.getElementsByTagNameNS("*", "rtept")];
-    const records = nodes.map((node, index) => ({
-      id: `gpx-${index}`,
-      latitude: Number(node.getAttribute("lat")),
-      longitude: Number(node.getAttribute("lon")),
-      elevation: node.getElementsByTagNameNS("*", "ele")[0]?.textContent,
-      timestamp: node.getElementsByTagNameNS("*", "time")[0]?.textContent,
-    })).filter((item) => item.timestamp && Number.isFinite(item.latitude) && Number.isFinite(item.longitude));
-    const coordinates = nodes.map((node) => [Number(node.getAttribute("lon")), Number(node.getAttribute("lat"))]).filter((item) => item.every(Number.isFinite));
-    return { records, coordinates };
+  async _sha256(bytesValue) {
+    if (globalThis.crypto?.subtle) { const digest=await crypto.subtle.digest("SHA-256",bytesValue);return [...new Uint8Array(digest)].map((b)=>b.toString(16).padStart(2,"0")).join(""); }
+    const words=[]; for(let index=0;index<bytesValue.length;index+=1) words[index>>2]|=bytesValue[index]<<(24-(index%4)*8);
+    const bitLength=bytesValue.length*8; words[bitLength>>5]|=0x80<<(24-bitLength%32); words[((bitLength+64>>9)<<4)+15]=bitLength;
+    const constants=[],primes=[]; for(let candidate=2;constants.length<64;candidate+=1){if(primes.every((prime)=>candidate%prime)){primes.push(candidate);constants.push((Math.pow(candidate,1/3)*0x100000000)|0);}}
+    let hash=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]; const right=(value,amount)=>value>>>amount|value<<(32-amount);
+    for(let offset=0;offset<words.length;offset+=16){const schedule=words.slice(offset,offset+16),old=hash.slice();for(let index=16;index<64;index+=1){const a=schedule[index-15],b=schedule[index-2];schedule[index]=(schedule[index-16]+(right(a,7)^right(a,18)^(a>>>3))+schedule[index-7]+(right(b,17)^right(b,19)^(b>>>10)))|0;}for(let index=0;index<64;index+=1){const e=hash[4],a=hash[0];const temp1=(hash[7]+(right(e,6)^right(e,11)^right(e,25))+((e&hash[5])^(~e&hash[6]))+constants[index]+schedule[index])|0;const temp2=((right(a,2)^right(a,13)^right(a,22))+((a&hash[1])^(a&hash[2])^(hash[1]&hash[2])))|0;hash=[(temp1+temp2)|0,hash[0],hash[1],hash[2],(hash[3]+temp1)|0,hash[4],hash[5],hash[6]];}hash=hash.map((value,index)=>(value+old[index])|0);}
+    return hash.map((value)=>(value>>>0).toString(16).padStart(8,"0")).join("");
   }
-
-  async _importRoute() {
-    const passage = this._state.passage;
-    if (!passage) { this._showNotice("Start a passage before attaching a planned route.", true); return; }
-    const file = this.shadowRoot.getElementById("route-file").files?.[0];
-    if (!file) { this._showNotice("Choose a GPX route file first.", true); return; }
-    try {
-      const buffer = await file.arrayBuffer();
-      const parsed = this._parseGpx(new TextDecoder().decode(buffer));
-      if (parsed.coordinates.length < 2) throw new Error("The GPX file has fewer than two route/track points.");
-      const label = this.shadowRoot.getElementById("route-label").value.trim() || "Planned route";
-      await this._call("route_add", { passage_id: passage.id, label, source: "gpx", sha256: await this._sha256(buffer), coordinates: parsed.coordinates });
-      await this._load(true);
-      this._showNotice("Planned route version attached. Route lines are advisory and remain separate from recorded tracks.");
-    } catch (error) { this._showNotice(error.message || String(error), true); }
-  }
-
-  async _rollbackImport(id) {
-    if (!confirm("Rollback this import batch? Only points inserted by this batch are removed; live Garmin points remain.")) return;
-    try { const result = await this._call("import_rollback", { import_id: id }); await this._load(true); this._showNotice(`Rolled back ${result.removed} imported records.`); }
-    catch (error) { this._showNotice(error.message || String(error), true); }
-  }
-
-  async _sha256(buffer) {
-    if (globalThis.crypto?.subtle) {
-      const digest = await crypto.subtle.digest("SHA-256", buffer);
-      return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    }
-    // Small synchronous SHA-256 fallback for HTTP local installations where
-    // SubtleCrypto is unavailable because the browser lacks a secure context.
-    const bytesValue = new Uint8Array(buffer);
-    const words = [];
-    for (let index = 0; index < bytesValue.length; index += 1) words[index >> 2] |= bytesValue[index] << (24 - (index % 4) * 8);
-    const bitLength = bytesValue.length * 8;
-    words[bitLength >> 5] |= 0x80 << (24 - bitLength % 32);
-    words[((bitLength + 64 >> 9) << 4) + 15] = bitLength;
-    const constants = [], primes = [];
-    for (let candidate = 2; constants.length < 64; candidate += 1) {
-      if (primes.every((prime) => candidate % prime)) {
-        primes.push(candidate);
-        constants.push((Math.pow(candidate, 1 / 3) * 0x100000000) | 0);
-      }
-    }
-    let hash = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-    const right = (value, amount) => value >>> amount | value << (32 - amount);
-    for (let offset = 0; offset < words.length; offset += 16) {
-      const schedule = words.slice(offset, offset + 16), old = hash.slice();
-      for (let index = 16; index < 64; index += 1) {
-        const a = schedule[index - 15], b = schedule[index - 2];
-        schedule[index] = (schedule[index - 16] + (right(a,7)^right(a,18)^(a>>>3)) + schedule[index - 7] + (right(b,17)^right(b,19)^(b>>>10))) | 0;
-      }
-      for (let index = 0; index < 64; index += 1) {
-        const e = hash[4], a = hash[0];
-        const temp1 = (hash[7] + (right(e,6)^right(e,11)^right(e,25)) + ((e&hash[5])^(~e&hash[6])) + constants[index] + schedule[index]) | 0;
-        const temp2 = ((right(a,2)^right(a,13)^right(a,22)) + ((a&hash[1])^(a&hash[2])^(hash[1]&hash[2]))) | 0;
-        hash = [(temp1+temp2)|0,hash[0],hash[1],hash[2],(hash[3]+temp1)|0,hash[4],hash[5],hash[6]];
-      }
-      hash = hash.map((value, index) => (value + old[index]) | 0);
-    }
-    return hash.map((value) => (value >>> 0).toString(16).padStart(8, "0")).join("");
-  }
-
-  _localInputValue(date) {
-    const offset = date.getTimezoneOffset() * 60000;
-    return new Date(date.getTime() - offset).toISOString().slice(0, 16);
-  }
-
-  _navigate(path) {
-    history.pushState(null, "", path);
-    window.dispatchEvent(new Event("location-changed"));
-  }
-
-  _haversine(lat1, lon1, lat2, lon2) {
-    const rad = (value) => value * Math.PI / 180;
-    const dLat = rad(lat2 - lat1), dLon = rad(lon2 - lon1);
-    const a = Math.sin(dLat/2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLon/2) ** 2;
-    return 3440.065 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
-  }
-
-  _bearing(lat1, lon1, lat2, lon2) {
-    const rad = (value) => value * Math.PI / 180;
-    const y = Math.sin(rad(lon2-lon1)) * Math.cos(rad(lat2));
-    const x = Math.cos(rad(lat1))*Math.sin(rad(lat2)) - Math.sin(rad(lat1))*Math.cos(rad(lat2))*Math.cos(rad(lon2-lon1));
-    return (Math.atan2(y,x) * 180 / Math.PI + 360) % 360;
-  }
+  _setTab(tab) { this._tab = tab; this._notice = null; this._render(); }
+  _show(text, error = false) { this._notice = { text, error }; this._renderNotice(); }
+  _navigate(path) { history.pushState(null,"",path); window.dispatchEvent(new Event("location-changed")); }
+  _localInput(date) { const offset=date.getTimezoneOffset()*60000;return new Date(date.getTime()-offset).toISOString().slice(0,16); }
+  _dateInput(date) { return this._localInput(date).slice(0,10); }
 }
 
-if (!customElements.get("bluesky-passage-panel")) {
-  customElements.define("bluesky-passage-panel", BlueSkyPassagePanel);
-}
+if (!customElements.get("bluesky-passage-panel")) customElements.define("bluesky-passage-panel", BlueSkyPassagePanel);

@@ -41,26 +41,41 @@ class AsyncArchive:
     async def async_latest_point(self) -> dict[str, Any] | None:
         return await self._call(self._database.latest_point)
 
+    async def async_point_by_id(self, point_id: int) -> dict[str, Any] | None:
+        return await self._call(self._database.point_by_id, point_id)
+
     async def async_query_points(self, **kwargs: Any) -> dict[str, Any]:
         return await self._call(self._database.query_points, **kwargs)
 
     async def async_dashboard_state(self) -> dict[str, Any]:
         return await self._call(self._database.dashboard_state)
 
+    async def async_integrity_check(self) -> str:
+        return await self._call(self._database.integrity_check)
+
     async def async_list_passages(self) -> list[dict[str, Any]]:
         return await self._call(self._database.list_passages)
+
+    async def async_passage_detail(self, passage_id: int) -> dict[str, Any]:
+        return await self._call(self._database.passage_detail, passage_id)
+
+    async def async_passage_points_and_metrics(
+        self, passage_id: int, *, max_points: int = 4000
+    ) -> dict[str, Any]:
+        return await self._call(
+            self._database.passage_points_and_metrics,
+            passage_id,
+            max_points=max_points,
+        )
 
     async def async_list_destinations(self) -> list[dict[str, Any]]:
         return await self._call(self._database.list_destinations)
 
-    async def async_start_passage(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return await self._call(self._database.start_passage, *args, **kwargs)
+    async def async_preview_passage(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._call(self._database.preview_passage, **kwargs)
 
-    async def async_set_destination(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return await self._call(self._database.set_destination, *args, **kwargs)
-
-    async def async_end_passage(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        return await self._call(self._database.end_passage, *args, **kwargs)
+    async def async_save_passage(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._call(self._database.save_passage, **kwargs)
 
     async def async_delete_passage(self, passage_id: int) -> None:
         await self._call(self._database.delete_passage, passage_id)
@@ -76,6 +91,55 @@ class AsyncArchive:
 
     async def async_list_imports(self) -> list[dict[str, Any]]:
         return await self._call(self._database.list_imports)
+
+    async def async_preview_records(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return await self._call(self._database.preview_records, *args, **kwargs)
+
+    async def async_create_backfill_job(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._call(self._database.create_backfill_job, **kwargs)
+
+    async def async_get_backfill_job(self, job_id: int) -> dict[str, Any]:
+        return await self._call(self._database.get_backfill_job, job_id)
+
+    async def async_list_backfill_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
+        return await self._call(self._database.list_backfill_jobs, limit)
+
+    async def async_next_backfill_chunk(self, job_id: int) -> dict[str, Any] | None:
+        return await self._call(self._database.next_backfill_chunk, job_id)
+
+    async def async_complete_backfill_chunk(
+        self, job_id: int, chunk_id: int, **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self._call(
+            self._database.complete_backfill_chunk, job_id, chunk_id, **kwargs
+        )
+
+    async def async_fail_backfill_chunk(
+        self, job_id: int, chunk_id: int, error: str
+    ) -> dict[str, Any]:
+        return await self._call(
+            self._database.fail_backfill_chunk, job_id, chunk_id, error
+        )
+
+    async def async_cancel_backfill_job(self, job_id: int) -> dict[str, Any]:
+        return await self._call(self._database.cancel_backfill_job, job_id)
+
+    async def async_save_weather_samples(
+        self, samples: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        return await self._call(self._database.save_weather_samples, samples)
+
+    async def async_query_weather_samples(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return await self._call(self._database.query_weather_samples, **kwargs)
+
+    async def async_cached_weather_sample(self, **kwargs: Any) -> dict[str, Any] | None:
+        return await self._call(self._database.cached_weather_sample, **kwargs)
+
+    async def async_get_vessel_profile(self) -> dict[str, Any]:
+        return await self._call(self._database.get_vessel_profile)
+
+    async def async_save_vessel_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        return await self._call(self._database.save_vessel_profile, profile)
 
     async def async_add_route_version(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return await self._call(self._database.add_route_version, *args, **kwargs)

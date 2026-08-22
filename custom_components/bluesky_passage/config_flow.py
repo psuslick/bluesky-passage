@@ -9,6 +9,9 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -21,6 +24,10 @@ from .const import (
     CONF_NOTIFICATIONS_ENABLED,
     CONF_PREDICTWIND_URL,
     CONF_STALE_MINUTES,
+    CONF_XWEATHER_CLIENT_ID,
+    CONF_XWEATHER_CLIENT_SECRET,
+    CONF_SPEED_UNIT,
+    CONF_HEIGHT_UNIT,
     CONF_ZONE_NOTIFICATIONS_ENABLED,
     DEFAULT_NOTIFICATIONS_ENABLED,
     DEFAULT_STALE_MINUTES,
@@ -163,7 +170,27 @@ class BlueSkyPassageOptionsFlow(config_entries.OptionsFlow):
                 else:
                     data = dict(user_input)
                     data[CONF_PREDICTWIND_URL] = predictwind_url
-                    return self.async_create_entry(title="", data=data)
+                    client_id = str(
+                        data.get(CONF_XWEATHER_CLIENT_ID) or ""
+                    ).strip()
+                    secret = str(
+                        data.get(CONF_XWEATHER_CLIENT_SECRET) or ""
+                    ).strip()
+                    if not client_id:
+                        data[CONF_XWEATHER_CLIENT_ID] = ""
+                        data.pop(CONF_XWEATHER_CLIENT_SECRET, None)
+                    elif not secret:
+                        previous_secret = self.config_entry.options.get(
+                            CONF_XWEATHER_CLIENT_SECRET,
+                            self.config_entry.data.get(CONF_XWEATHER_CLIENT_SECRET, ""),
+                        )
+                        if previous_secret:
+                            data[CONF_XWEATHER_CLIENT_SECRET] = previous_secret
+                        else:
+                            errors["base"] = "xweather_credentials_pair"
+                    data[CONF_XWEATHER_CLIENT_ID] = client_id
+                    if not errors:
+                        return self.async_create_entry(title="", data=data)
         options = self.config_entry.options
         return self.async_show_form(
             step_id="init",
@@ -190,6 +217,37 @@ class BlueSkyPassageOptionsFlow(config_entries.OptionsFlow):
                             self.config_entry.data.get(CONF_PREDICTWIND_URL, ""),
                         ),
                     ): str,
+                    vol.Optional(
+                        CONF_XWEATHER_CLIENT_ID,
+                        default=options.get(
+                            CONF_XWEATHER_CLIENT_ID,
+                            self.config_entry.data.get(CONF_XWEATHER_CLIENT_ID, ""),
+                        ),
+                    ): str,
+                    vol.Optional(CONF_XWEATHER_CLIENT_SECRET): TextSelector(
+                        TextSelectorConfig(
+                            type=TextSelectorType.PASSWORD,
+                            autocomplete="new-password",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_SPEED_UNIT,
+                        default=options.get(CONF_SPEED_UNIT, "kn"),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["kn", "km/h", "mph"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_HEIGHT_UNIT,
+                        default=options.get(CONF_HEIGHT_UNIT, "m"),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=["m", "ft"],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_ZONE_NOTIFICATIONS_ENABLED,
                         default=options.get(

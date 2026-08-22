@@ -16,7 +16,6 @@ from .const import (
     CONF_ZONE_NOTIFICATIONS_ENABLED,
     DEFAULT_ZONE_NOTIFICATIONS_ENABLED,
     GPS_PROBLEM_DELAY,
-    NOTIFICATION_ARRIVAL,
     NOTIFICATION_EMERGENCY,
     NOTIFICATION_GPS,
     NOTIFICATION_SOURCE,
@@ -39,7 +38,6 @@ class NotificationManager:
         self._gps_alerted = False
         self._gps_invalid_since: datetime | None = None
         self._last_message_id: int | None = None
-        self._last_arrival_id: int | None = None
         self._source_alerted = False
         self._cancel_zone_listener: Any = None
 
@@ -77,7 +75,7 @@ class NotificationManager:
                 DEFAULT_ZONE_NOTIFICATIONS_ENABLED,
             )
         )
-        if enabled and self.runtime.monitoring:
+        if enabled:
             self.hass.async_create_task(
                 self._send(
                     NOTIFICATION_ZONE,
@@ -118,7 +116,7 @@ class NotificationManager:
                             f"The latest report is about {age:.0f} minutes old; "
                             f"the configured threshold is {self.runtime.stale_minutes} minutes."
                             if age is not None
-                            else "No Garmin report is archived for the active passage."
+                            else "No Garmin report is archived yet."
                         ),
                     )
             else:
@@ -181,8 +179,7 @@ class NotificationManager:
 
             message_id = self._newest_message_id()
             if (
-                self.runtime.monitoring
-                and message_id is not None
+                message_id is not None
                 and self._last_message_id is not None
                 and message_id != self._last_message_id
             ):
@@ -194,19 +191,7 @@ class NotificationManager:
                 )
             self._last_message_id = message_id
 
-            arrival = self.runtime.coordinator.last_arrival
-            if arrival and arrival.get("id") != self._last_arrival_id:
-                await self._send(
-                    NOTIFICATION_ARRIVAL,
-                    "BlueSky Passage arrival radius reached",
-                    f"{arrival['name']} reached the {arrival['arrival_radius_nm']} nm radius for {arrival['destination_name']}. End the passage manually after confirming arrival.",
-                )
-                self._last_arrival_id = int(arrival["id"])
-
-            source_problem = (
-                self.runtime.monitoring
-                and self.runtime.coordinator.consecutive_failures >= 3
-            )
+            source_problem = self.runtime.coordinator.consecutive_failures >= 3
             if source_problem and not self._source_alerted:
                 await self._send(
                     NOTIFICATION_SOURCE,
