@@ -178,6 +178,20 @@ def main() -> int:
             errors.append(f"JavaScript syntax: {result.stderr.strip()}")
 
     frontend_text = javascript.read_text(encoding="utf-8")
+    frontend_register_text = (COMPONENT / "frontend.py").read_text(encoding="utf-8")
+    if "config_panel_domain=DOMAIN" in frontend_register_text:
+        errors.append("Sidebar panel must not hijack the integration Options Flow")
+    for required_frontend_marker in (
+        "this._backfillStart =",
+        "this._backfillEnd =",
+        'event.target.id === "backfill-start"',
+        'event.target.id === "backfill-end"',
+        "Requested range:",
+    ):
+        if required_frontend_marker not in frontend_text:
+            errors.append(
+                f"Backfill UI persistence/range marker missing: {required_frontend_marker}"
+            )
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))
     server_commands = set(re.findall(r'f"\{DOMAIN\}/([a-z_]+)"', backend_text))

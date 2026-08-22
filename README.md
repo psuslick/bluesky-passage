@@ -1,13 +1,15 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.1.0 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.1.1 is a Home Assistant custom integration and responsive
 sidebar panel for locally archiving and analyzing positions exposed through a
 Garmin MapShare feed. It provides a continuous, non-purging source archive;
 editable passage annotations; linked maps and charts; optional on-demand
 Xweather wind/marine data; and a conservative comparison-route generator.
+
+**2.1.1 maintenance fixes:** Garmin backfill date selections now survive panel redraws, the running job shows its exact requested range and chunk count, duplicate preview starts are blocked while a job is active, and Home Assistant integration options no longer loop back to the sidebar panel.
 
 This repository contains no installation-specific share name, tracking URL,
 coordinates, messages, IMEI, destination, provider credential, or archive
@@ -21,7 +23,7 @@ this release and should accompany future change requests.
 ## Read this first
 
 - A recommended application-class or high-endurance microSD card is supported.
-  An SSD is an optional resilience upgrade, not a v2.1.0 prerequisite.
+  An SSD is an optional resilience upgrade, not a v2.1.1 prerequisite.
 - BlueSky Passage is supplementary. It is not a navigation, weather-routing,
   collision-avoidance, charting, or emergency system.
 - The generated path is a **comparison estimate**, never a safe or navigable
@@ -49,7 +51,7 @@ comparison engine, panel, and authenticated API are one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, open the upper-right menu and select **Custom repositories**.
 3. Add `https://github.com/psuslick/bluesky-passage` as an **Integration**.
-4. Open **BlueSky Passage**, select **Download**, and choose version 2.1.0.
+4. Open **BlueSky Passage**, select **Download**, and choose version 2.1.1.
 5. Restart Home Assistant; a browser reload alone is not sufficient.
 
 For a fresh installation:
@@ -119,7 +121,7 @@ rollback, calculate paths, export, or test notifications.
 
 ## Storage and write behavior
 
-The existing recommended-class microSD is adequate because v2.1.0 deliberately
+The existing recommended-class microSD is adequate because v2.1.1 deliberately
 keeps background work small:
 
 - Garmin is polled every 10 minutes with a rolling 48-hour overlap.
@@ -302,7 +304,7 @@ testing it independently in Developer tools.
 | Home Assistant zone changes | No | Optional; disabled by default |
 
 There is no passage-arrival notification or automatic passage transition in
-v2.1.0 because passages are editable historical annotations.
+v2.1.1 because passages are editable historical annotations.
 
 ## Privacy model
 

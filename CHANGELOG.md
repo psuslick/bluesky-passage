@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1 — 2026-08-22
+
+- Fixed Garmin historical-backfill date inputs so administrator selections persist across Home Assistant data-event and panel redraws instead of reverting to the one-year defaults.
+- Added the exact requested start/end range and chunk count to the backfill job card so the submitted range is auditable before import.
+- Disabled starting another preview while the current backfill job is pending/running and added explicit reversed-date validation.
+- Removed `config_panel_domain` from the custom sidebar registration so Home Assistant's integration cog opens the real Options Flow instead of looping back to BlueSky Passage.
+- Added bundle validation guards for both regressions.
+
 ## 2.1.0 — 2026-08-22
 
 - Rebuilt the panel around four proper top tabs: Overview, History & charts,
