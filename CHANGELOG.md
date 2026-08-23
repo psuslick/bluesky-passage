@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.3.0 — 2026-08-23
+
+- Redesigns **Passage analytics** as three vertically stacked plots on one shared time axis: observed SOG, modeled wind/gust envelope, and modeled wave height. Modeled samples are explicitly dotted/dashed rather than presented with the same visual weight as Garmin observations.
+- Adds normal map zoom behavior: reliable +/− controls, mouse-wheel/trackpad zoom centered on the pointer, double-click zoom, and two-finger pinch zoom while preserving drag-to-pan. Map controls no longer start a drag gesture.
+- Adds a live **Actual vs modeled** route-deviation analysis for current saved routes. Garmin reports are projected monotonically onto the modeled sailing route so the matched route position never moves backward.
+- Adds current deviation, maximum deviation, extra recorded distance, distance efficiency, modeled progress, modeled distance-to-progress, and modeled-vs-actual time delta. Port is negative/left and starboard is positive/right.
+- Adds the requested horizontal port/on-route/starboard deviation indicator, a progress-based deviation history chart, and optional representative deviation connectors on the passage map.
+- Adds deviation-scale controls with **Auto**, fixed ±1/2/5/10/20/50/100 nmi choices, and a symmetric **Custom** override. Manual scale choices persist per passage in the browser; values beyond a manual scale are explicitly marked as visually clipped rather than silently hidden.
+- Stores modeled elapsed time at optimized-route waypoints so time-to-equivalent-progress comparisons use the route search timeline instead of simple whole-route proportional timing.
+- Refreshes actual-vs-modeled metrics when passage detail is requested, without recalculating the weather route.
+- Bumps the route context engine to `isochrone-water-v2`; saved pre-2.3 route analyses are intentionally marked stale and must be recalculated once to gain waypoint timing/deviation semantics.
+- Raises passage-map point requests to the same 10,000-point frontend display limit used by History & charts.
+- Adds route-deviation regression coverage for port/starboard sign, monotonic route progress, and modeled waypoint-time interpolation.
+
 ## 2.2.2 — 2026-08-23
 
 ### Fixed

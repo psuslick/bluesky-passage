@@ -1,17 +1,27 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.2.2-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.2.2 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.3.0 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
 
+## What changed in 2.3.0
+
+Version 2.3.0 focuses on making the passage analysis understandable and directly comparable with the modeled sailing route. The analytics view now uses three stacked plots with one time axis: observed SOG, modeled wind with an optional gust envelope, and modeled wave height. Weather samples remain visibly sparse/dashed so they are not mistaken for Garmin observations.
+
+Map interaction now supports reliable +/− controls, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, two-finger pinch zoom, and drag panning. Map controls are excluded from drag capture.
+
+Passage route analysis adds a live **Actual vs modeled** card. Archived Garmin positions are matched monotonically to the saved modeled sailing route, producing current/max port-starboard deviation, extra recorded distance, route-progress efficiency, modeled progress, and actual-vs-modeled time delta. The main deviation indicator is horizontal (port left, on-route center, starboard right) and supports Auto, fixed symmetric, or Custom ±nmi scale selection. The chosen override persists per passage in that browser. Optional representative connector lines can be shown on the passage map.
+
+The route engine fingerprint is bumped to `isochrone-water-v2` because optimized routes now store elapsed time at route waypoints. Existing pre-2.3 saved route analyses are therefore intentionally marked stale; recalculate each route once after upgrade to enable the new timing and deviation semantics.
+
 ## What changed in 2.2.2
 
-Version 2.2.2 carries forward the 2.2.1 map-pan correction and fixes the History & charts time-series presentation. Missing numeric values are no longer coerced to zero, the chart spans the exact selected query interval, the frontend requests up to the backend's 10,000-point display limit, and the chart reports observed/model sample coverage explicitly. Route-planner weather samples remain separate from observed-track weather because they describe different positions and predicted times.
+Version 2.2.2 carried forward the 2.2.1 map-pan correction and fixed the History & charts time-series presentation. Missing numeric values are no longer coerced to zero, the chart spans the selected query interval, the frontend requests up to the backend's 10,000-point display limit, and the chart reports observed/model sample coverage explicitly. Route-planner weather samples remain separate from observed-track weather because they describe different positions and predicted times.
 
 ## What changed in 2.2.0
 
@@ -51,7 +61,7 @@ navigation system, weather-routing authority, collision-avoidance system, or
 emergency system. Garmin/inReach and the appropriate emergency-response channel
 remain authoritative for SOS functions.
 
-The v2.2 routing engine enforces a coarse dry-land constraint and sailing no-go
+The v2.3 routing engine enforces a coarse dry-land constraint and sailing no-go
 constraint because a route that crosses modeled land or assumes an impossible
 upwind heading is not useful even as a comparison. That does **not** make the
 result navigable. The bundled land mask is not a nautical chart and does not
@@ -84,14 +94,14 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.2.2**.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.3.0**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
 6. Open BlueSky Passage and verify archive count, earliest/latest timestamps,
    archive integrity, Garmin availability, and provider status.
-7. Recalculate any passage route. Pre-2.2 route comparisons are intentionally
-   stale and should not be relied on.
+7. Recalculate any passage route. Pre-2.3 route analyses are intentionally
+   stale and must be recalculated once before using the new actual-vs-modeled comparison.
 
 For a fresh installation, open **Settings → Devices & services → Add
 integration**, select **BlueSky Passage**, enter the Garmin MapShare share name
@@ -372,9 +382,7 @@ preview and verify Garmin actually exposes older records.
 
 ### Map will not pan
 
-Version 2.2 adds pointer/touch drag panning and arrow-button panning. If the map
-still behaves like the old version after upgrade, hard-refresh the browser or
-reset the Companion App frontend cache and confirm the footer reports 2.2.2.
+Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.3.0.
 
 ### Basemap blank but overlays appear
 

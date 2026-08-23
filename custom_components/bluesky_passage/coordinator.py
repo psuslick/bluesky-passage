@@ -21,6 +21,7 @@ from .calculations import (
     destination_metrics,
     haversine_nm,
     parse_utc,
+    route_deviation_analysis,
 )
 from .const import (
     CONF_LINK_NAME,
@@ -676,6 +677,118 @@ class BlueSkyRuntime:
                 result["route_recalculated"] = True
         return result
 
+    async def async_passage_detail(self, passage_id: int) -> dict[str, Any]:
+        """Return passage detail with live actual-vs-modeled metrics."""
+        detail = await self.archive.async_passage_detail(passage_id)
+        route = detail.get("route")
+        if route and route.get("context_status") == "current":
+            summary = route.get("summary") or {}
+            selected = summary.get("selected") or {}
+            if selected.get("coordinates"):
+                departure = summary.get("departure_at_utc") or route.get("departure_at_utc") or detail["started_at_utc"]
+                summary["actual"] = await self._actual_route_analysis(
+                    detail, selected, departure
+                )
+                route["summary"] = summary
+        return detail
+
+    async def _actual_route_analysis(
+        self,
+        detail: dict[str, Any],
+        selected: dict[str, Any],
+        departure_at_utc: str,
+    ) -> dict[str, Any]:
+        """Analyze the archived Garmin track against a saved modeled route."""
+        actual_query = await self.archive.async_query_points(
+            start_utc=_utc(parse_utc(departure_at_utc)),
+            end_utc=detail.get("ended_at_utc"),
+            source=SOURCE_GARMIN,
+            max_points=100_000,
+        )
+        actual_points = [
+            point
+            for point in actual_query["points"]
+            if point.get("latitude") is not None and point.get("longitude") is not None
+        ]
+        actual_distance = sum(
+            haversine_nm(
+                float(first["latitude"]),
+                float(first["longitude"]),
+                float(second["latitude"]),
+                float(second["longitude"]),
+            )
+            for first, second in zip(actual_points, actual_points[1:])
+        )
+        elapsed_hours = None
+        range_remaining = None
+        progress_efficiency = None
+        max_cross_track = None
+        destination = None
+        if detail.get("destination_latitude") is not None and detail.get("destination_longitude") is not None:
+            destination = (
+                float(detail["destination_latitude"]),
+                float(detail["destination_longitude"]),
+            )
+        if actual_points and destination:
+            range_remaining = haversine_nm(
+                float(actual_points[-1]["latitude"]),
+                float(actual_points[-1]["longitude"]),
+                destination[0],
+                destination[1],
+            )
+            start = (
+                float(selected["coordinates"][0][1]),
+                float(selected["coordinates"][0][0]),
+            )
+            direct_progress = haversine_nm(
+                start[0],
+                start[1],
+                float(actual_points[-1]["latitude"]),
+                float(actual_points[-1]["longitude"]),
+            )
+            if actual_distance > 0:
+                progress_efficiency = direct_progress / actual_distance * 100
+            deviations = [
+                abs(
+                    cross_track_nm(
+                        start[0],
+                        start[1],
+                        destination[0],
+                        destination[1],
+                        float(point["latitude"]),
+                        float(point["longitude"]),
+                    )
+                )
+                for point in actual_points
+            ]
+            max_cross_track = max(deviations) if deviations else None
+        if len(actual_points) >= 2:
+            elapsed_hours = (
+                parse_utc(actual_points[-1]["recorded_at_utc"])
+                - parse_utc(actual_points[0]["recorded_at_utc"])
+            ).total_seconds() / 3600
+        comparison = route_deviation_analysis(
+            actual_points,
+            selected.get("coordinates") or [],
+            route_waypoints=selected.get("waypoints"),
+            modeled_total_hours=selected.get("estimated_hours"),
+            departure_at_utc=departure_at_utc,
+        )
+        return {
+            "state": "complete_range" if detail.get("ended_at_utc") else "to_date",
+            "report_count": actual_query["total_matching"],
+            "through_report_utc": actual_points[-1]["recorded_at_utc"] if actual_points else None,
+            "recorded_distance_nm": round(actual_distance, 2),
+            "elapsed_hours": round(elapsed_hours, 2) if elapsed_hours is not None else None,
+            "range_remaining_nm": round(range_remaining, 2) if range_remaining is not None else None,
+            "direct_progress_efficiency_percent": round(progress_efficiency, 1) if progress_efficiency is not None else None,
+            "max_cross_track_from_direct_nm": round(max_cross_track, 2) if max_cross_track is not None else None,
+            "modeled_comparison": comparison,
+            "coverage_note": (
+                "Actual metrics use archived Garmin reports in the passage range; gaps and reporting interval affect distance and deviation."
+            ),
+        }
+
     async def async_plan_route(
         self, passage_id: int, departure_at_utc: str | None = None
     ) -> dict[str, Any]:
@@ -746,80 +859,9 @@ class BlueSkyRuntime:
         summary = optimize_sailing_route(
             start, destination, departure, profile, baseline, samples
         )
-        actual_query = await self.archive.async_query_points(
-            start_utc=_utc(parse_utc(departure)),
-            end_utc=detail.get("ended_at_utc"),
-            source=SOURCE_GARMIN,
-            max_points=100_000,
+        summary["actual"] = await self._actual_route_analysis(
+            detail, summary["selected"], departure
         )
-        actual_points = [
-            point
-            for point in actual_query["points"]
-            if point.get("latitude") is not None and point.get("longitude") is not None
-        ]
-        actual_distance = sum(
-            float(point.get("distance_from_prior_nm") or 0) for point in actual_points
-        )
-        elapsed_hours = None
-        range_remaining = None
-        progress_efficiency = None
-        max_cross_track = None
-        if actual_points:
-            range_remaining = haversine_nm(
-                float(actual_points[-1]["latitude"]),
-                float(actual_points[-1]["longitude"]),
-                destination[0],
-                destination[1],
-            )
-            direct_progress = haversine_nm(
-                start[0],
-                start[1],
-                float(actual_points[-1]["latitude"]),
-                float(actual_points[-1]["longitude"]),
-            )
-            if actual_distance > 0:
-                progress_efficiency = direct_progress / actual_distance * 100
-            deviations = [
-                abs(
-                    cross_track_nm(
-                        start[0],
-                        start[1],
-                        destination[0],
-                        destination[1],
-                        float(point["latitude"]),
-                        float(point["longitude"]),
-                    )
-                )
-                for point in actual_points
-            ]
-            max_cross_track = max(deviations) if deviations else None
-        if len(actual_points) >= 2:
-            elapsed_hours = (
-                parse_utc(actual_points[-1]["recorded_at_utc"])
-                - parse_utc(actual_points[0]["recorded_at_utc"])
-            ).total_seconds() / 3600
-        summary["actual"] = {
-            "state": "complete_range" if detail.get("ended_at_utc") else "to_date",
-            "report_count": actual_query["total_matching"],
-            "through_report_utc": actual_points[-1]["recorded_at_utc"]
-            if actual_points
-            else None,
-            "recorded_distance_nm": round(actual_distance, 2),
-            "elapsed_hours": round(elapsed_hours, 2) if elapsed_hours is not None else None,
-            "range_remaining_nm": round(range_remaining, 2)
-            if range_remaining is not None
-            else None,
-            "direct_progress_efficiency_percent": round(progress_efficiency, 1)
-            if progress_efficiency is not None
-            else None,
-            "max_cross_track_from_direct_nm": round(max_cross_track, 2)
-            if max_cross_track is not None
-            else None,
-            "coverage_note": (
-                "Actual metrics use archived Garmin reports in the passage range; "
-                "gaps and reporting interval affect distance and deviation."
-            ),
-        }
         summary["warnings"] = sorted(set([*(summary.get("warnings") or []), *warnings]))
         summary["passage_id"] = passage_id
         summary["departure_at_utc"] = _utc(parse_utc(departure))

@@ -206,9 +206,16 @@ def main() -> int:
         errors.append("Frontend numeric validity must preserve missing values instead of coercing null to zero")
     if "max_points: 10000" not in frontend_text:
         errors.append("History/chart query must request the backend 10,000-point display limit")
-    for chart_marker in ("chart-coverage", "No cached track-weather samples in this period", "this._query.range?.start_utc"):
+    for chart_marker in (
+        "chart-coverage",
+        "No cached track-weather samples in this period",
+        "this._query.range?.start_utc",
+        "analytics-svg",
+        "Gust envelope",
+        "Modeled weather uses dashed interpolation",
+    ):
         if chart_marker not in frontend_text:
-            errors.append(f"v2.2.2 chart regression marker missing: {chart_marker}")
+            errors.append(f"v2.3 chart regression marker missing: {chart_marker}")
 
     for required_frontend_marker in (
         "_startMapDrag",
@@ -225,9 +232,25 @@ def main() -> int:
                 f"v2.2 map/routing UI marker missing: {required_frontend_marker}"
             )
 
+    for required_v23_marker in (
+        '_zoomMapAt',
+        '_wheelMap',
+        '_doubleClickMap',
+        'Math.log2(distance/this._mapPinch.startDistance)',
+        '.map-controls,.map-attribution,a,button,input,select,label',
+        'Actual vs modeled',
+        'Deviation scale',
+        'Auto (±',
+        '_deviationStorageKey',
+        'Map connectors',
+        'modeled_progress_percent',
+    ):
+        if required_v23_marker not in frontend_text:
+            errors.append(f"v2.3 map/deviation UI marker missing: {required_v23_marker}")
+
     routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
     for marker in (
-        'ROUTING_ENGINE_VERSION = "isochrone-water-v1"',
+        'ROUTING_ENGINE_VERSION = "isochrone-water-v2"',
         "segment_is_water",
         "minimum_upwind_twa_deg",
         '"scored_candidate": False',
@@ -243,13 +266,26 @@ def main() -> int:
         errors.append("Bounded Garmin empty-KML handling regression guard is missing")
 
     database_text = (COMPONENT / "database.py").read_text(encoding="utf-8")
-    if '"routing_engine": "isochrone-water-v1"' not in database_text:
-        errors.append("Route context does not invalidate pre-v2.2 routing semantics")
+    if '"routing_engine": "isochrone-water-v2"' not in database_text:
+        errors.append("Route context does not invalidate pre-v2.3 route/deviation semantics")
 
     land_text = (COMPONENT / "land.py").read_text(encoding="utf-8")
     for marker in ("landmask_1_25min.bit.gz", "segment_is_water", "path_is_water"):
         if marker not in land_text:
             errors.append(f"Land-mask implementation marker missing: {marker}")
+    calculations_text = (COMPONENT / "calculations.py").read_text(encoding="utf-8")
+    for marker in (
+        "route_deviation_analysis",
+        "minimum_progress_nm",
+        "signed_deviation_nm",
+        "modeled_elapsed_to_progress_hours",
+    ):
+        if marker not in calculations_text:
+            errors.append(f"v2.3 route-deviation calculation marker missing: {marker}")
+
+    if 'runtime.coordinator.async_passage_detail' not in (COMPONENT / "websocket.py").read_text(encoding="utf-8"):
+        errors.append("Passage detail must refresh live actual-vs-modeled metrics through the coordinator")
+
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))
     server_commands = set(re.findall(r'f"\{DOMAIN\}/([a-z_]+)"', backend_text))

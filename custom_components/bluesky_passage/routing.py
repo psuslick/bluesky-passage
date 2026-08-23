@@ -23,7 +23,7 @@ from .calculations import haversine_nm, initial_bearing_true, parse_utc
 from .land import is_land, mask_metadata, path_is_water, segment_is_water
 
 EARTH_RADIUS_NM = 3440.065
-ROUTING_ENGINE_VERSION = "isochrone-water-v1"
+ROUTING_ENGINE_VERSION = "isochrone-water-v2"
 
 
 def _finite(value: Any) -> float | None:
@@ -657,6 +657,7 @@ class _RouteState:
     distance_nm: float
     risk_total: float
     path: tuple[tuple[float, float], ...]
+    path_elapsed_hours: tuple[float, ...]
     last_heading: float | None
     maneuvers: int
     weather_steps: int
@@ -756,6 +757,14 @@ def _route_candidate_from_state(
         "key": key,
         "label": label,
         "coordinates": coordinates,
+        "waypoints": [
+            {
+                "longitude": round(point[1], 6),
+                "latitude": round(point[0], 6),
+                "elapsed_hours": round(elapsed, 3),
+            }
+            for point, elapsed in zip(state.path, state.path_elapsed_hours)
+        ],
         "distance_nm": round(distance, 2),
         "estimated_hours": round(state.elapsed_hours, 2),
         "eta_utc": (departure + timedelta(hours=state.elapsed_hours)).isoformat().replace("+00:00", "Z"),
@@ -839,7 +848,7 @@ def optimize_sailing_route(
     max_iterations = min(160, max(30, int(math.ceil(estimated_hours / step_hours * 2.8)) + 18))
     arrival_nm = 0.35
     initial = _RouteState(
-        start[0], start[1], departure, 0.0, 0.0, 0.0, (start,), None, 0, 0
+        start[0], start[1], departure, 0.0, 0.0, 0.0, (start,), (0.0,), None, 0, 0
     )
     initial.score = _state_score(initial, destination, profile.base_speed_kn)
     frontier = [initial]
@@ -882,6 +891,7 @@ def optimize_sailing_route(
                             state.distance_nm + remaining,
                             state.risk_total + final_perf["risk"] * close_hours,
                             state.path + (destination,),
+                            state.path_elapsed_hours + (elapsed,),
                             final_perf["heading_deg"],
                             state.maneuvers + maneuver,
                             state.weather_steps + int(weather is not None),
@@ -941,6 +951,7 @@ def optimize_sailing_route(
                     state.distance_nm + distance,
                     risk_total,
                     state.path + (next_point,),
+                    state.path_elapsed_hours + (elapsed,),
                     heading,
                     state.maneuvers + maneuver,
                     state.weather_steps + int(weather is not None),

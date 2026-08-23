@@ -226,7 +226,7 @@ async def ws_passage_detail(hass, connection, msg) -> None:
     if not runtime:
         return
     try:
-        result = await runtime.archive.async_passage_detail(msg["passage_id"])
+        result = await runtime.coordinator.async_passage_detail(msg["passage_id"])
     except ValueError as err:
         _error(connection, msg, err)
     else:

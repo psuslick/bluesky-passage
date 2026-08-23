@@ -145,6 +145,50 @@ class CalculationTests(unittest.TestCase):
         self.assertAlmostEqual(0, value, places=5)
 
 
+class RouteDeviationTests(unittest.TestCase):
+    def test_signed_deviation_uses_port_left_and_starboard_right(self):
+        route = [[-76.0, 35.0], [-75.0, 35.0]]
+        points = [
+            {"id": 1, "recorded_at_utc": "2026-08-23T12:00:00Z", "latitude": 35.0, "longitude": -76.0},
+            {"id": 2, "recorded_at_utc": "2026-08-23T13:00:00Z", "latitude": 35.1, "longitude": -75.7},
+        ]
+        result = calculations.route_deviation_analysis(points, route, modeled_total_hours=10, departure_at_utc="2026-08-23T12:00:00Z")
+        self.assertTrue(result["available"])
+        self.assertEqual("port", result["current_side"])
+        self.assertLess(result["current_signed_deviation_nm"], 0)
+
+        points[-1]["latitude"] = 34.9
+        result = calculations.route_deviation_analysis(points, route, modeled_total_hours=10, departure_at_utc="2026-08-23T12:00:00Z")
+        self.assertEqual("starboard", result["current_side"])
+        self.assertGreater(result["current_signed_deviation_nm"], 0)
+
+    def test_route_progress_never_moves_backward(self):
+        route = [[-76.0, 35.0], [-75.5, 35.0], [-75.0, 35.0]]
+        points = [
+            {"id": 1, "recorded_at_utc": "2026-08-23T12:00:00Z", "latitude": 35.0, "longitude": -75.7},
+            {"id": 2, "recorded_at_utc": "2026-08-23T13:00:00Z", "latitude": 35.0, "longitude": -75.9},
+            {"id": 3, "recorded_at_utc": "2026-08-23T14:00:00Z", "latitude": 35.0, "longitude": -75.4},
+        ]
+        result = calculations.route_deviation_analysis(points, route, modeled_total_hours=12, departure_at_utc="2026-08-23T12:00:00Z")
+        progress = [item["modeled_progress_nm"] for item in result["samples"]]
+        self.assertEqual(progress, sorted(progress))
+
+    def test_waypoint_timing_interpolates_modeled_elapsed(self):
+        route = [[-76.0, 35.0], [-75.5, 35.0], [-75.0, 35.0]]
+        waypoints = [
+            {"longitude": -76.0, "latitude": 35.0, "elapsed_hours": 0.0},
+            {"longitude": -75.5, "latitude": 35.0, "elapsed_hours": 4.0},
+            {"longitude": -75.0, "latitude": 35.0, "elapsed_hours": 10.0},
+        ]
+        points = [
+            {"id": 1, "recorded_at_utc": "2026-08-23T12:00:00Z", "latitude": 35.0, "longitude": -76.0},
+            {"id": 2, "recorded_at_utc": "2026-08-23T17:00:00Z", "latitude": 35.0, "longitude": -75.5},
+        ]
+        result = calculations.route_deviation_analysis(points, route, route_waypoints=waypoints, modeled_total_hours=10, departure_at_utc="2026-08-23T12:00:00Z")
+        self.assertAlmostEqual(4.0, result["modeled_elapsed_to_progress_hours"], places=1)
+        self.assertAlmostEqual(1.0, result["time_delta_hours"], places=1)
+
+
 class GarminDateTests(unittest.TestCase):
     def test_bounded_parameters_are_utc_and_ordered(self):
         result = garmin_dates.garmin_date_params(
@@ -245,6 +289,9 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(result["selected"]["land_valid"])
         self.assertEqual(0, result["selected"]["no_go_violations"])
         self.assertGreater(result["selected"]["distance_nm"], result["reference"]["distance_nm"])
+        self.assertEqual(len(result["selected"]["coordinates"]), len(result["selected"]["waypoints"]))
+        self.assertEqual(0.0, result["selected"]["waypoints"][0]["elapsed_hours"])
+        self.assertAlmostEqual(result["selected"]["estimated_hours"], result["selected"]["waypoints"][-1]["elapsed_hours"], places=2)
 
     def test_partial_profile_has_a_bounded_fallback_speed(self):
         profile = routing.VesselProfile.from_mapping({"waterline_length_ft": 36})

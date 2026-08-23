@@ -1,6 +1,6 @@
-# BlueSky Passage 2.2.0 release decisions
+# BlueSky Passage 2.3.0 release decisions
 
-These are deliberate v2.2.0 choices. Revisit them explicitly in a future
+These are deliberate v2.3.0 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
 
 1. **Question: Is an SSD required?**  
@@ -83,7 +83,7 @@ version rather than treating them as accidental implementation details.
     with a merely slower straight-line speed. Candidate evolution must produce
     tacks/heading changes when required.
 
-15. **Question: What does the v2.2 route engine do?**  
+15. **Question: What does the route engine do?**  
     **Decision:** Start from the water-valid geometric corridor and run a bounded,
     time-dependent beam/isochrone-style heading search. Evaluate destination
     headings, offsets, prior heading, and close-hauled options. Use polar/fallback
@@ -94,9 +94,7 @@ version rather than treating them as accidental implementation details.
 
 16. **Question: What happens when route semantics or inputs change?**  
     **Decision:** Fingerprint passage boundaries, departure, destination version,
-    vessel-profile revision, and routing-engine version. The v2.2 engine version
-    intentionally makes every v2.1 three-corridor result stale and suppresses
-    its overlay until recalculated.
+    vessel-profile revision, and routing-engine version. The v2.3 `isochrone-water-v2` fingerprint intentionally makes pre-2.3 route analyses stale so route waypoint timing and modeled-route deviation semantics cannot be mixed with older saved results.
 
 17. **Question: Is the generated path navigable?**  
     **Decision:** No. Hard land/no-go validity is a minimum coherence standard,
@@ -111,8 +109,9 @@ version rather than treating them as accidental implementation details.
 
 19. **Question: How should map interaction work?**  
     **Decision:** Support mouse/pen/touch pointer dragging with per-map persistent
-    view state, suppress accidental point selection after drag, keep zoom/fit,
-    and provide arrow-button panning as an accessible non-drag alternative.
+    view state, suppress accidental point selection after drag, provide reliable
+    +/− and fit controls, pointer-centered wheel/trackpad and double-click zoom,
+    two-finger pinch zoom, and arrow-button panning as an accessible alternative.
 
 20. **Question: What is the dashboard information architecture?**  
     **Decision:** Preserve Home Assistant's left sidebar for global navigation.
@@ -149,3 +148,27 @@ version rather than treating them as accidental implementation details.
     archive count, earliest/latest timestamps, integrity, source availability,
     and provider status afterward. Do not copy only the live SQLite main file
     because WAL companion data may be needed for a consistent snapshot.
+
+
+27. **Question: How is actual track deviation matched to a modeled route?**  
+    **Decision:** Project each Garmin report to the closest eligible point on the
+    saved modeled polyline while enforcing nondecreasing modeled-route progress.
+    This prevents a looping or nearby route segment from making the comparison
+    jump backward. Report signed deviation as port-negative and starboard-positive.
+
+28. **Question: How is route-deviation scale chosen?**  
+    **Decision:** Default to the smallest symmetric automatic ±nmi scale with
+    headroom. Allow fixed ±1/2/5/10/20/50/100 nmi and symmetric Custom overrides.
+    Persist the display preference per passage in the browser. Never silently
+    clip numeric values; flag visual overflow explicitly.
+
+29. **Question: How should History analytics distinguish observations from models?**  
+    **Decision:** Use three stacked plots on one time axis. Garmin SOG is the
+    observed series. Wind/wave are sparse modeled samples joined with dashed
+    interpolation and visible sample markers. Gust is an optional envelope rather
+    than a competing equally weighted line. Missing values remain gaps.
+
+30. **Question: Should actual-vs-modeled metrics require rerunning Xweather?**  
+    **Decision:** No. Preserve the saved modeled route and refresh the Garmin-side
+    comparison whenever passage detail is requested. Recalculate the weather route
+    only when the route inputs/context change or the user explicitly requests it.

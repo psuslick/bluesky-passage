@@ -1,6 +1,6 @@
 # Third-party data notice
 
-BlueSky Passage 2.2.1 bundles a bit-packed land/water mask generated from the
+BlueSky Passage 2.3.0 bundles a bit-packed land/water mask generated from the
 `lsmask_1.25min_i.bin` dataset distributed by the Matplotlib Basemap data
 package (`basemap-data` 2.0.0). The mask is used only as a conservative routing
 constraint so comparison paths do not cross modeled dry land. The upstream

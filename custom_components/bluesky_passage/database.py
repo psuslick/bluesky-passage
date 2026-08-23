@@ -41,7 +41,7 @@ def route_context_hash(
         "profile_updated_at_utc": profile_updated_at_utc,
         # Routing semantics are part of the saved context. This intentionally
         # marks every pre-2.2 three-corridor result stale after upgrade.
-        "routing_engine": "isochrone-water-v1",
+        "routing_engine": "isochrone-water-v2",
     }
     return hashlib.sha256(
         json.dumps(context, sort_keys=True, separators=(",", ":")).encode()
