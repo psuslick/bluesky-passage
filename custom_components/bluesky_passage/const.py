@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "bluesky_passage"
-VERSION = "2.2.0"
+VERSION = "2.2.2"
 ENTRY_TITLE = "BlueSky Passage"
 
 CONF_LINK_NAME = "link_name"

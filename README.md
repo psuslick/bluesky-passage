@@ -1,13 +1,17 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.2.2-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.2.0 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.2.2 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
+
+## What changed in 2.2.2
+
+Version 2.2.2 carries forward the 2.2.1 map-pan correction and fixes the History & charts time-series presentation. Missing numeric values are no longer coerced to zero, the chart spans the exact selected query interval, the frontend requests up to the backend's 10,000-point display limit, and the chart reports observed/model sample coverage explicitly. Route-planner weather samples remain separate from observed-track weather because they describe different positions and predicted times.
 
 ## What changed in 2.2.0
 
@@ -80,7 +84,7 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.2.0**.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.2.2**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
@@ -370,7 +374,7 @@ preview and verify Garmin actually exposes older records.
 
 Version 2.2 adds pointer/touch drag panning and arrow-button panning. If the map
 still behaves like the old version after upgrade, hard-refresh the browser or
-reset the Companion App frontend cache and confirm the footer reports 2.2.0.
+reset the Companion App frontend cache and confirm the footer reports 2.2.2.
 
 ### Basemap blank but overlays appear
 

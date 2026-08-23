@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.2.2 — 2026-08-23
+
+### Fixed
+
+- Fixed the frontend numeric-validity helper so `null`, `undefined`, blank strings, and booleans are not coerced to numeric zero. Missing SOG/wind/wave values now remain true chart gaps instead of creating false zero readings.
+- Made the analytics x-axis honor the exact selected query range even when the first/last records have missing numeric values.
+- Raised the History & charts point request from 4,000 to the backend-supported 10,000 display points and retained explicit decimation reporting beyond that bound.
+- Added chart coverage counts for returned reports, valid SOG values, cached track-weather samples, wind samples, wave samples, and optional gust samples.
+- Added an explicit explanation when no track-weather samples are cached; route-candidate weather is intentionally not mixed into the observed-track graph.
+- Carries forward the v2.2.1 inverse-Web-Mercator map-pan correction.
+
+## 2.2.1 — 2026-08-23
+
+### Fixed
+
+- Corrected the inverse Web Mercator longitude calculation used by map panning.
+  Dragging or using the pan buttons no longer shifts the map approximately 180°
+  in longitude (for example, from coastal North Carolina to East Asia).
+- Added a bundle regression guard for the project/unproject longitude round trip so
+  this map-navigation failure cannot silently return in a future release.
+
 ## 2.2.0 — 2026-08-23
 
 - Replaced the v2.1 direct/port/starboard corridor scorer with a bounded, time-dependent sailing heading search; the direct geodesic is now reference-only and can never win by being physically impossible but shorter.

@@ -8,7 +8,7 @@ const COLORS = {
 const esc = (value) => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-const finite = (value) => Number.isFinite(Number(value));
+const finite = (value) => value !== null && value !== undefined && value !== "" && typeof value !== "boolean" && Number.isFinite(Number(value));
 const num = (value, digits = 1, unit = "") => finite(value) ? `${Number(value).toFixed(digits)}${unit}` : "—";
 const local = (value) => {
   if (!value) return "—";
@@ -125,7 +125,7 @@ class BlueSkyPassagePanel extends HTMLElement {
         .toolbar{padding:12px;margin-bottom:14px;align-items:end}label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--secondary-text-color)}
         input,select,textarea{min-height:39px;border:1px solid var(--divider-color);border-radius:8px;padding:8px 10px;background:var(--secondary-background-color);color:var(--primary-text-color)}textarea{min-height:78px;resize:vertical}
         .segmented{display:inline-flex;border:1px solid var(--divider-color);border-radius:9px;overflow:hidden}.segmented button{border:0;border-right:1px solid var(--divider-color);background:var(--card-background-color);color:var(--secondary-text-color);padding:8px 11px}.segmented button:last-child{border-right:0}.segmented button.active{background:var(--primary-color);color:var(--text-primary-color,#fff)}
-        .chart{padding:16px}.chart svg{display:block;width:100%;height:auto;min-height:260px}.chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-bottom:7px}.chart-legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:5px}
+        .chart{padding:16px}.chart svg{display:block;width:100%;height:auto;min-height:260px}.chart-coverage{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--secondary-text-color);font-size:12px;margin:0 0 8px}.chart-hint{font-size:12px;color:var(--secondary-text-color);background:var(--secondary-background-color);border-radius:7px;padding:9px 11px;margin:0 0 10px}.chart-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-bottom:7px}.chart-legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:5px}.chart-legend .series-missing{opacity:.5}
         .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--divider-color);vertical-align:top}th{color:var(--secondary-text-color);font-weight:600}
         .form-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:11px}.span2{grid-column:span 2}.span4{grid-column:1/-1}.section-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
         .coverage{border-left:4px solid var(--primary-color);padding:12px;background:var(--secondary-background-color);border-radius:7px}.warning{border-left-color:#ff9800}.danger-text{color:var(--error-color,#ef5350)}
@@ -225,7 +225,7 @@ class BlueSkyPassagePanel extends HTMLElement {
   async _loadQuery(fit = false) {
     if (!this._hass) return;
     if (fit) this._mapViews = {};
-    const payload = { range: this._range, source: this._source, max_points: 4000, ...this._customRange() };
+    const payload = { range: this._range, source: this._source, max_points: 10000, ...this._customRange() };
     if (this._range === "passage") {
       if (!this._passageId) throw new Error("Choose a passage.");
       payload.passage_id = this._passageId;
@@ -356,9 +356,23 @@ class BlueSkyPassagePanel extends HTMLElement {
     const wind = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._speedValue(item.wind_speed_kn)]);
     const gust = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._speedValue(item.wind_gust_kn)]);
     const wave = weather.map((item) => [new Date(item.valid_at_utc).getTime(), this._heightValue(item.wave_height_m)]);
-    const all = [...speed, ...wind, ...(this._showGust ? gust : []), ...wave].filter((item) => finite(item[1]));
-    if (all.length < 2) return `<div class="empty">More records are needed. Select Weather model and fetch data to add modeled wind and waves.</div>`;
-    const minX = Math.min(...all.map((item) => item[0])); const maxX = Math.max(...all.map((item) => item[0]));
+    const speedCount = speed.filter((item) => finite(item[1])).length;
+    const windCount = wind.filter((item) => finite(item[1])).length;
+    const gustCount = gust.filter((item) => finite(item[1])).length;
+    const waveCount = wave.filter((item) => finite(item[1])).length;
+    const all = [...speed, ...wind, ...(this._showGust ? gust : []), ...wave].filter((item) => finite(item[1]) && finite(item[0]));
+    const rangeStart = this._query.range?.start_utc ? new Date(this._query.range.start_utc).getTime() : NaN;
+    const rangeEnd = this._query.range?.end_utc ? new Date(this._query.range.end_utc).getTime() : NaN;
+    const dataMinX = all.length ? Math.min(...all.map((item) => item[0])) : NaN;
+    const dataMaxX = all.length ? Math.max(...all.map((item) => item[0])) : NaN;
+    const minX = finite(rangeStart) ? rangeStart : dataMinX;
+    const maxX = finite(rangeEnd) ? rangeEnd : dataMaxX;
+    const totalMatching = Number(this._query.total_matching ?? points.length);
+    const trackCoverage = `${points.length.toLocaleString()} displayed${this._query.decimated ? ` of ${totalMatching.toLocaleString()} matching` : ""} reports · ${speedCount.toLocaleString()} with SOG`;
+    const weatherCoverage = weather.length ? `${weather.length.toLocaleString()} cached track-weather samples · ${windCount.toLocaleString()} wind · ${waveCount.toLocaleString()} wave${this._showGust ? ` · ${gustCount.toLocaleString()} gust` : ""}` : "No cached track-weather samples in this period";
+    const coverage = `<div class="chart-coverage"><span>${esc(trackCoverage)}</span><span>${esc(weatherCoverage)}</span></div>`;
+    const modelHint = !weather.length ? `<div class="chart-hint">Wind and wave values used by a route calculation are intentionally not overlaid on the observed-track chart because they describe candidate route positions/times. To populate this chart, choose <strong>Weather model</strong> above and use <strong>Fetch / refresh model data</strong>.</div>` : "";
+    if (all.length < 2 || !finite(minX) || !finite(maxX)) return `${coverage}${modelHint}<div class="empty">More valid observations are needed for this period. Missing values are left as gaps rather than plotted as zero.</div>`;
     const maxKn = Math.max(1, ...[...speed, ...wind, ...(this._showGust ? gust : [])].filter((i) => finite(i[1])).map((i) => i[1]));
     const maxWave = Math.max(1, ...wave.filter((i) => finite(i[1])).map((i) => i[1])); const w = 960, h = 270, left = 52, right = 54, top = 18, bottom = 38;
     const x = (v) => left + (v - minX) / Math.max(maxX - minX, 1) * (w - left - right);
@@ -366,20 +380,20 @@ class BlueSkyPassagePanel extends HTMLElement {
     const paths = (values, y) => {
       const segments = []; let segment = [];
       for (const item of values) {
-        if (!finite(item[1]) || item[3]) { if (segment.length) segments.push(segment); segment = []; }
-        if (finite(item[1])) segment.push(item);
+        if (!finite(item[1]) || !finite(item[0]) || item[3]) { if (segment.length) segments.push(segment); segment = []; }
+        if (finite(item[1]) && finite(item[0])) segment.push(item);
       }
       if (segment.length) segments.push(segment);
       return segments.map((items) => items.map((item, index) => `${index ? "L" : "M"}${x(item[0]).toFixed(1)},${y(item[1]).toFixed(1)}`).join(" "));
     };
     const lines = [[speed, COLORS.speed, yKn], [wind, COLORS.wind, yKn], ...(this._showGust ? [[gust, COLORS.gust, yKn]] : []), [wave, COLORS.wave, yWave]];
-    return `<div class="chart-legend"><span><i style="background:${COLORS.speed}"></i>Vessel SOG (observed)</span><span><i style="background:${COLORS.wind}"></i>Wind (modeled)</span>${this._showGust ? `<span><i style="background:${COLORS.gust}"></i>Gust (modeled)</span>` : ""}<span><i style="background:${COLORS.wave}"></i>Wave height (modeled)</span></div>
+    return `${coverage}${modelHint}<div class="chart-legend"><span><i style="background:${COLORS.speed}"></i>Vessel SOG (observed)</span><span class="${windCount ? "" : "series-missing"}"><i style="background:${COLORS.wind}"></i>Wind (modeled)${windCount ? "" : " · no samples"}</span>${this._showGust ? `<span class="${gustCount ? "" : "series-missing"}"><i style="background:${COLORS.gust}"></i>Gust (modeled)${gustCount ? "" : " · no samples"}</span>` : ""}<span class="${waveCount ? "" : "series-missing"}"><i style="background:${COLORS.wave}"></i>Wave height (modeled)${waveCount ? "" : " · no samples"}</span></div>
       <svg viewBox="0 0 ${w} ${h}" aria-label="Linked time series"><g stroke="var(--divider-color)" stroke-width="1">${[0,.25,.5,.75,1].map((f) => `<line x1="${left}" x2="${w-right}" y1="${top+f*(h-top-bottom)}" y2="${top+f*(h-top-bottom)}"/>`).join("")}</g>
       <g fill="var(--secondary-text-color)" font-size="11"><text x="5" y="${top+4}">${maxKn.toFixed(0)} ${esc(this._speedUnit)}</text><text x="20" y="${h-bottom+4}">0</text><text x="${w-right+7}" y="${top+4}">${maxWave.toFixed(1)} ${esc(this._heightUnit)}</text><text x="${left}" y="${h-10}">${esc(local(new Date(minX).toISOString()))}</text><text text-anchor="end" x="${w-right}" y="${h-10}">${esc(local(new Date(maxX).toISOString()))}</text></g>
       ${lines.map(([values, color, y]) => paths(values, y).map((path) => `<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`).join("")).join("")}
-      ${lines.map(([values, color, y]) => values.filter((item) => finite(item[1])).map((item) => `<circle cx="${x(item[0])}" cy="${y(item[1])}" r="2.5" fill="${color}"/>`).join("")).join("")}
+      ${lines.map(([values, color, y]) => values.filter((item) => finite(item[1]) && finite(item[0])).map((item) => `<circle cx="${x(item[0])}" cy="${y(item[1])}" r="2.5" fill="${color}"/>`).join("")).join("")}
       ${this._selectedIndex >= 0 && points[this._selectedIndex] ? `<line x1="${x(new Date(points[this._selectedIndex].recorded_at_utc).getTime())}" x2="${x(new Date(points[this._selectedIndex].recorded_at_utc).getTime())}" y1="${top}" y2="${h-bottom}" stroke="var(--primary-text-color)" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>` : ""}
-      ${speed.filter((item) => finite(item[1])).map((item) => `<circle data-action="point" data-index="${points.findIndex((p) => p.id === item[2])}" cx="${x(item[0])}" cy="${yKn(item[1])}" r="8" fill="${COLORS.speed}" opacity=".001" tabindex="0" role="button" aria-label="Select report ${esc(local(new Date(item[0]).toISOString()))}"><title>${local(new Date(item[0]).toISOString())}: ${item[1]} ${esc(this._speedUnit)}</title></circle>`).join("")}</svg>`;
+      ${speed.filter((item) => finite(item[1]) && finite(item[0])).map((item) => `<circle data-action="point" data-index="${points.findIndex((p) => p.id === item[2])}" cx="${x(item[0])}" cy="${yKn(item[1])}" r="8" fill="${COLORS.speed}" opacity=".001" tabindex="0" role="button" aria-label="Select report ${esc(local(new Date(item[0]).toISOString()))}"><title>${local(new Date(item[0]).toISOString())}: ${item[1]} ${esc(this._speedUnit)}</title></circle>`).join("")}</svg>`;
   }
 
   _passagesHtml() {
@@ -804,7 +818,7 @@ class BlueSkyPassagePanel extends HTMLElement {
     for(let z=16;z>=1;z-=1){const a=this._project(latMax,lon,z),b=this._project(latMin,lon,z);const xSpan=256*2**z*lonSpan/360;if(xSpan<width*.82&&Math.abs(b.y-a.y)<height*.78)return{lat,lon,zoom:z};} return{lat,lon,zoom:1};
   }
   _project(lat,lon,zoom){const scale=256*2**zoom;const bounded=Math.max(-85.0511,Math.min(85.0511,lat));const sin=Math.sin(bounded*Math.PI/180);return{x:(lon+180)/360*scale,y:(.5-Math.log((1+sin)/(1-sin))/(4*Math.PI))*scale};}
-  _unproject(x,y,zoom){const scale=256*2**zoom;const lon=((x/scale*360+180)%360+360)%360-180;const n=Math.PI-2*Math.PI*y/scale;const lat=180/Math.PI*Math.atan(Math.sinh(n));return{lat:Math.max(-85.0511,Math.min(85.0511,lat)),lon};}
+  _unproject(x,y,zoom){const scale=256*2**zoom;const lon=((x/scale*360)%360+360)%360-180;const n=Math.PI-2*Math.PI*y/scale;const lat=180/Math.PI*Math.atan(Math.sinh(n));return{lat:Math.max(-85.0511,Math.min(85.0511,lat)),lon};}
 
   _speedValue(value) { if (!finite(value)) return null; const knots=Number(value); return this._speedUnit === "km/h" ? knots*1.852 : this._speedUnit === "mph" ? knots*1.150779 : knots; }
   _heightValue(value) { if (!finite(value)) return null; return this._heightUnit === "ft" ? Number(value)*3.28084 : Number(value); }

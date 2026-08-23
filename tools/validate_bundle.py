@@ -196,6 +196,20 @@ def main() -> int:
             errors.append(
                 f"Backfill UI persistence/range marker missing: {required_frontend_marker}"
             )
+    # The inverse Web Mercator longitude must round-trip _project().  The 2.2.0
+    # expression added 180 degrees during unprojection, teleporting the map on pan.
+    if "const lon=((x/scale*360)%360+360)%360-180" not in frontend_text:
+        errors.append("Map inverse-projection longitude regression guard failed")
+    if "x/scale*360+180" in frontend_text:
+        errors.append("Map inverse-projection contains the v2.2.0 180-degree offset bug")
+    if 'value !== null && value !== undefined && value !== ""' not in frontend_text:
+        errors.append("Frontend numeric validity must preserve missing values instead of coercing null to zero")
+    if "max_points: 10000" not in frontend_text:
+        errors.append("History/chart query must request the backend 10,000-point display limit")
+    for chart_marker in ("chart-coverage", "No cached track-weather samples in this period", "this._query.range?.start_utc"):
+        if chart_marker not in frontend_text:
+            errors.append(f"v2.2.2 chart regression marker missing: {chart_marker}")
+
     for required_frontend_marker in (
         "_startMapDrag",
         "_moveMapDrag",
