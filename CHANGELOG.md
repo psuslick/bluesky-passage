@@ -1,5 +1,14 @@
 # BlueSky Passage changelog
 
+## 2.4.0 — 2026-08-23
+
+- Adds an interactive **departure / arrival pin picker** to Create passage and View / edit. The user selects which pin to place and clicks the OpenStreetMap view; BlueSky Passage immediately populates the matching latitude/longitude fields.
+- Shows the existing passage track behind the pin picker when available, with separate departure and arrival markers. New passages without coordinates start centered on the latest archived vessel position when available.
+- Pin placement works with the existing drag-pan, wheel/trackpad zoom, pinch zoom, +/− buttons, arrow pan controls, and fit control. Dragging is distinguished from clicking so a pan does not accidentally move a pin.
+- Manual coordinate edits and map pin placement remain interchangeable; the fit control includes the track and both pins. Changing a pin invalidates any prior coverage preview so Save cannot reuse a preview for different coordinates.
+- Updates the Home Assistant device-tracker base-class import from the deprecated `device_tracker.config_entry.TrackerEntity` alias to `homeassistant.components.device_tracker.TrackerEntity`, eliminating the Core 2027.6 deprecation warning.
+- Retains the v2.3.3 passage-detail WebSocket dispatch correction and metadata-only passage editor.
+
 ## 2.3.3 — 2026-08-23
 
 - Fixed **View / edit** WebSocket dispatch. The v2.3.2 handler incorrectly called `runtime.coordinator.async_passage_detail(...)`, but `async_passage_detail(...)` is implemented on the `BlueSkyRuntime` facade, not `BlueSkyCoordinator`. This caused the exact Home Assistant `AttributeError` reported from `websocket.py`.

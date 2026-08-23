@@ -249,6 +249,26 @@ def main() -> int:
         if required_v23_marker not in frontend_text:
             errors.append(f"v2.3 map/deviation UI marker missing: {required_v23_marker}")
 
+    for required_v24_marker in (
+        'data-picker="passage"',
+        'Set departure and arrival on map',
+        'Place departure',
+        'Place arrival',
+        '_placePassagePin(event, map)',
+        '_clearPassagePin(pin)',
+        'this._passageDraft.departure_latitude=lat',
+        'this._passageDraft.destination_latitude=lat',
+        'this._passageMapPoints',
+    ):
+        if required_v24_marker not in frontend_text:
+            errors.append(f"v2.4 passage-pin UI marker missing: {required_v24_marker}")
+
+    tracker_text = (COMPONENT / "device_tracker.py").read_text(encoding="utf-8")
+    if 'from homeassistant.components.device_tracker import SourceType, TrackerEntity' not in tracker_text:
+        errors.append("TrackerEntity must use the current homeassistant.components.device_tracker import path")
+    if 'device_tracker.config_entry import TrackerEntity' in tracker_text:
+        errors.append("Deprecated TrackerEntity config_entry alias must not be used")
+
     routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
     for marker in (
         'ROUTING_ENGINE_VERSION = "isochrone-water-v3"',

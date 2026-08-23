@@ -1,7 +1,12 @@
-# BlueSky Passage 2.3.3 release decisions
+# BlueSky Passage 2.4.0 release decisions
 
-These are deliberate v2.3.3 choices. Revisit them explicitly in a future
+These are deliberate v2.4.0 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
+
+
+## Passage coordinate picker
+
+Departure and arrival coordinates may be entered numerically or placed on an interactive map. Map placement is an editing aid only: it writes the chosen latitude/longitude into the same passage fields and does not bypass coverage preview, route land checks, or destination validation. Departure and arrival remain distinct explicit pins; the picker never silently derives or changes coordinates from the route solver.
 
 
 ## Passage editing is a metadata-only operation

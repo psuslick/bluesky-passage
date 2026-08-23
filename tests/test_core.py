@@ -973,5 +973,27 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("12.5", content)
 
 
+class FrontendFeatureTests(unittest.TestCase):
+    def test_passage_pin_picker_populates_coordinate_fields(self):
+        root = Path(__file__).resolve().parents[1]
+        frontend = (root / "custom_components" / "bluesky_passage" / "frontend" / "bluesky-passage-panel.js").read_text(encoding="utf-8")
+        for marker in (
+            'data-picker="passage"',
+            'Place departure',
+            'Place arrival',
+            '_placePassagePin(event, map)',
+            'this._passageDraft.departure_latitude=lat',
+            'this._passageDraft.destination_latitude=lat',
+            'this._passagePreview=null',
+        ):
+            self.assertIn(marker, frontend)
+
+    def test_tracker_entity_uses_current_home_assistant_import(self):
+        root = Path(__file__).resolve().parents[1]
+        tracker = (root / "custom_components" / "bluesky_passage" / "device_tracker.py").read_text(encoding="utf-8")
+        self.assertIn('from homeassistant.components.device_tracker import SourceType, TrackerEntity', tracker)
+        self.assertNotIn('device_tracker.config_entry import TrackerEntity', tracker)
+
+
 if __name__ == "__main__":
     unittest.main()

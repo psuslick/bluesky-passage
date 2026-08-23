@@ -1,13 +1,19 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.3.3-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.3.3 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.4.0 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
+
+## What changed in 2.4.0
+
+Version 2.4.0 adds an interactive coordinate picker to passage creation and editing. Select **Place departure** or **Place arrival**, then click the map to populate the corresponding latitude and longitude fields. Existing passage tracks are shown as context when available; otherwise the picker starts from the latest archived vessel position when possible. The picker uses the same pan/zoom gestures and controls as the other BlueSky maps, and manual coordinate entry remains fully supported.
+
+Any pin change invalidates an earlier coverage preview, so the passage must be previewed again before Save. This keeps the preview token tied to the exact coordinates being saved. The release also switches `TrackerEntity` to Home Assistant's current import path and removes the Core 2027.6 deprecation warning.
 
 ## What changed in 2.3.3
 
@@ -104,7 +110,7 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.3.3**.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.4.0**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
@@ -392,7 +398,7 @@ preview and verify Garmin actually exposes older records.
 
 ### Map will not pan
 
-Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.3.3.
+Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.4.0.
 
 ### Basemap blank but overlays appear
 
