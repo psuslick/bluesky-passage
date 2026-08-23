@@ -1,7 +1,16 @@
-# BlueSky Passage 2.3.0 release decisions
+# BlueSky Passage 2.3.1 release decisions
 
-These are deliberate v2.3.0 choices. Revisit them explicitly in a future
+These are deliberate v2.3.1 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
+
+
+## Coastal endpoint ambiguity
+
+The bundled global land mask remains a conservative, non-navigation-grade 1.25-arc-minute mask. Passage route endpoints that fall in a coarse shoreline cell may be resolved to the nearest modeled-water cell within a small bounded distance (2 nmi for departure; destination uses at least 1.5 nmi and the configured arrival-radius concept, capped at 10 nmi). The original passage/destination coordinates are preserved and the adjustment is disclosed in the route summary. Interior route segments are never granted this exception.
+
+## Passage-detail resilience
+
+Opening the administrator edit form does not require live actual-vs-modeled analysis. Supplemental analysis is best-effort and may report an analysis-specific failure without blocking passage metadata access.
 
 1. **Question: Is an SSD required?**  
    **Decision:** No. A healthy application-class/high-endurance microSD with
@@ -94,7 +103,7 @@ version rather than treating them as accidental implementation details.
 
 16. **Question: What happens when route semantics or inputs change?**  
     **Decision:** Fingerprint passage boundaries, departure, destination version,
-    vessel-profile revision, and routing-engine version. The v2.3 `isochrone-water-v2` fingerprint intentionally makes pre-2.3 route analyses stale so route waypoint timing and modeled-route deviation semantics cannot be mixed with older saved results.
+    vessel-profile revision, and routing-engine version. The v2.3.1 `isochrone-water-v3` fingerprint intentionally makes pre-2.3.1 route analyses stale so corrected coastal-endpoint handling, route waypoint timing, and modeled-route deviation semantics cannot be mixed with older saved results.
 
 17. **Question: Is the generated path navigable?**  
     **Decision:** No. Hard land/no-go validity is a minimum coherence standard,

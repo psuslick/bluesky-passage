@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -23,6 +24,8 @@ from .const import (
 )
 from .exporting import export_points
 from .parser import records_from_mappings
+
+_LOGGER = logging.getLogger(__name__)
 
 RANGES = ["24h", "1d", "3d", "7d", "30d", "1y", "all", "custom", "passage"]
 SOURCES = [
@@ -218,6 +221,7 @@ async def ws_passage_save(hass, connection, msg) -> None:
         vol.Required("type"): f"{DOMAIN}/passage_detail",
         vol.Optional("entry_id"): str,
         vol.Required("passage_id"): vol.Coerce(int),
+        vol.Optional("include_analysis", default=True): bool,
     }
 )
 @websocket_api.async_response
@@ -226,9 +230,21 @@ async def ws_passage_detail(hass, connection, msg) -> None:
     if not runtime:
         return
     try:
-        result = await runtime.coordinator.async_passage_detail(msg["passage_id"])
+        result = await runtime.coordinator.async_passage_detail(
+            msg["passage_id"], include_analysis=msg["include_analysis"]
+        )
     except ValueError as err:
         _error(connection, msg, err)
+    except Exception:
+        _LOGGER.exception(
+            "BlueSky Passage could not load passage detail for passage %s",
+            msg["passage_id"],
+        )
+        connection.send_error(
+            msg["id"],
+            "passage_detail_failed",
+            "Passage details could not be loaded. Check the Home Assistant log for the underlying error.",
+        )
     else:
         connection.send_result(msg["id"], result)
 

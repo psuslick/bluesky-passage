@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.1 — 2026-08-23
+
+### Fixed
+
+- Fixed **View / edit** so administrator passage editing no longer depends on supplemental actual-vs-modeled analysis. Live route analysis is now best-effort and cannot block access to passage metadata; unexpected detail failures are logged with an explicit Home Assistant error instead of surfacing only as “Unknown error.”
+- Added coastal endpoint ambiguity handling for the bundled 1.25-arc-minute land mask. A departure or destination that falls in a coarse shoreline cell can be shifted a small, bounded distance to the nearest modeled-water cell for route computation while the saved Garmin position/destination remains unchanged.
+- Destination endpoint resolution respects the configured arrival-radius concept and remains bounded; genuinely inland departure/destination coordinates still fail closed rather than being silently routed to a distant coast.
+- Route summaries now disclose any endpoint adjustment and its distance. Interior route segments still use the same hard land-intersection test; this does not weaken land rejection for the route itself.
+- Bumped the route context engine to `isochrone-water-v3` so any v2.3.0 route is marked stale and recalculated with the corrected coastal-endpoint semantics.
+- Added regression tests for a coarse coastal land cell resolving to nearby modeled water and for a genuinely inland coordinate refusing the same 2 nmi adjustment.
+
 ## 2.3.0 — 2026-08-23
 
 - Redesigns **Passage analytics** as three vertically stacked plots on one shared time axis: observed SOG, modeled wind/gust envelope, and modeled wave height. Modeled samples are explicitly dotted/dashed rather than presented with the same visual weight as Garmin observations.

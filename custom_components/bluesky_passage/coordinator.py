@@ -51,6 +51,7 @@ from .feed import (
     GarminFeedClient,
 )
 from .database import route_context_hash
+from .land import is_land, nearest_water_point
 from .routing import (
     VesselProfile,
     optimize_sailing_route,
@@ -677,18 +678,41 @@ class BlueSkyRuntime:
                 result["route_recalculated"] = True
         return result
 
-    async def async_passage_detail(self, passage_id: int) -> dict[str, Any]:
-        """Return passage detail with live actual-vs-modeled metrics."""
+    async def async_passage_detail(
+        self, passage_id: int, *, include_analysis: bool = True
+    ) -> dict[str, Any]:
+        """Return passage detail; live comparison analytics are best-effort.
+
+        Editing passage metadata must never be blocked by a route-analysis
+        failure. Callers opening the edit form can explicitly skip the live
+        analysis, while normal passage viewing still refreshes it.
+        """
         detail = await self.archive.async_passage_detail(passage_id)
         route = detail.get("route")
-        if route and route.get("context_status") == "current":
+        if include_analysis and route and route.get("context_status") == "current":
             summary = route.get("summary") or {}
             selected = summary.get("selected") or {}
             if selected.get("coordinates"):
-                departure = summary.get("departure_at_utc") or route.get("departure_at_utc") or detail["started_at_utc"]
-                summary["actual"] = await self._actual_route_analysis(
-                    detail, selected, departure
+                departure = (
+                    summary.get("departure_at_utc")
+                    or route.get("departure_at_utc")
+                    or detail["started_at_utc"]
                 )
+                try:
+                    summary["actual"] = await self._actual_route_analysis(
+                        detail, selected, departure
+                    )
+                    summary.pop("actual_analysis_error", None)
+                except Exception as err:  # analysis is supplemental; keep detail usable
+                    _LOGGER.exception(
+                        "BlueSky Passage actual-vs-modeled analysis failed for passage %s",
+                        passage_id,
+                    )
+                    summary["actual_analysis_error"] = (
+                        "Actual-vs-modeled analysis could not be refreshed. "
+                        "Passage metadata and the saved route remain available; "
+                        "see the Home Assistant log for the underlying error."
+                    )
                 route["summary"] = summary
         return detail
 
@@ -822,10 +846,84 @@ class BlueSkyRuntime:
             if point.get("latitude") is None or point.get("longitude") is None:
                 raise ValueError("The passage has no report with a valid position")
             start = (float(point["latitude"]), float(point["longitude"]))
-        destination = (
+        requested_start = start
+        requested_destination = (
             float(detail["destination_latitude"]),
             float(detail["destination_longitude"]),
         )
+        destination = requested_destination
+        endpoint_warnings: list[str] = []
+        endpoint_adjustments: dict[str, Any] = {
+            "departure": {
+                "requested": [requested_start[1], requested_start[0]],
+                "routed": [requested_start[1], requested_start[0]],
+                "adjusted": False,
+                "distance_nm": 0.0,
+            },
+            "destination": {
+                "requested": [requested_destination[1], requested_destination[0]],
+                "routed": [requested_destination[1], requested_destination[0]],
+                "adjusted": False,
+                "distance_nm": 0.0,
+            },
+        }
+
+        # The bundled global mask is deliberately conservative and coarse. A
+        # marina slip or narrow harbor channel can occupy a cell classified as
+        # land. Resolve only the endpoint ambiguity to nearby modeled water;
+        # every interior route segment still has to pass the hard land mask.
+        if is_land(*start):
+            resolved_start = nearest_water_point(*start, max_distance_nm=2.0)
+            if resolved_start is None:
+                raise ValueError(
+                    "The departure coordinate is more than 2 nmi from modeled water. "
+                    "Move the departure waypoint closer to navigable water."
+                )
+            start = (resolved_start["latitude"], resolved_start["longitude"])
+            endpoint_adjustments["departure"] = {
+                "requested": [requested_start[1], requested_start[0]],
+                "routed": [start[1], start[0]],
+                "adjusted": True,
+                "distance_nm": round(resolved_start["distance_nm"], 2),
+            }
+            endpoint_warnings.append(
+                "The departure fix fell in a coastal land-mask cell; the modeled "
+                f"routing start was shifted {resolved_start['distance_nm']:.2f} nmi "
+                "to the nearest modeled-water cell. The recorded Garmin track was not changed."
+            )
+
+        arrival_radius = float(detail.get("arrival_radius_nm") or 2.0)
+        if is_land(*destination):
+            # At least one coarse-cell width is allowed so a waterfront/city
+            # destination does not become unusable solely because of mask
+            # resolution. Larger configured arrival radii are honored up to a
+            # bounded 10 nmi endpoint search.
+            destination_limit = min(10.0, max(1.5, arrival_radius))
+            resolved_destination = nearest_water_point(
+                *destination, max_distance_nm=destination_limit
+            )
+            if resolved_destination is None:
+                raise ValueError(
+                    "The destination coordinate falls on modeled land and no modeled-water "
+                    f"endpoint was found within {destination_limit:.1f} nmi. "
+                    "Move the destination waypoint or increase its arrival radius."
+                )
+            destination = (
+                resolved_destination["latitude"],
+                resolved_destination["longitude"],
+            )
+            endpoint_adjustments["destination"] = {
+                "requested": [requested_destination[1], requested_destination[0]],
+                "routed": [destination[1], destination[0]],
+                "adjusted": True,
+                "distance_nm": round(resolved_destination["distance_nm"], 2),
+            }
+            endpoint_warnings.append(
+                "The destination fell in a coastal land-mask cell; the modeled route "
+                f"ends {resolved_destination['distance_nm']:.2f} nmi away at the nearest "
+                "modeled-water cell. The saved destination and arrival radius were not changed."
+            )
+
         profile_data = await self.archive.async_get_vessel_profile()
         profile = VesselProfile.from_mapping(profile_data["profile"])
         # v2.2: the direct geodesic is reference-only. Build a water-valid
@@ -859,6 +957,8 @@ class BlueSkyRuntime:
         summary = optimize_sailing_route(
             start, destination, departure, profile, baseline, samples
         )
+        summary["endpoint_adjustments"] = endpoint_adjustments
+        summary["endpoint_notes"] = endpoint_warnings
         summary["actual"] = await self._actual_route_analysis(
             detail, summary["selected"], departure
         )

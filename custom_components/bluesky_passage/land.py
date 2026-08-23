@@ -55,6 +55,69 @@ def is_land(latitude: float, longitude: float) -> bool:
     return bool(byte & (1 << (7 - (index & 7))))
 
 
+def nearest_water_point(
+    latitude: float,
+    longitude: float,
+    *,
+    max_distance_nm: float = 2.0,
+) -> dict[str, float] | None:
+    """Return the nearest modeled-water cell center within a bounded radius.
+
+    The global mask is intentionally coarse (1.25 arc-minutes). Marina slips,
+    narrow channels, and waterfront GPS fixes can therefore fall in a cell that
+    is predominantly land even when the real position is navigable water. This
+    helper is used only to resolve that *endpoint ambiguity*; route segments
+    remain subject to the normal hard land-intersection test.
+    """
+    latitude = float(latitude)
+    longitude = ((float(longitude) + 180.0) % 360.0) - 180.0
+    max_distance_nm = max(0.0, float(max_distance_nm))
+    if not is_land(latitude, longitude):
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "distance_nm": 0.0,
+        }
+    if max_distance_nm <= 0:
+        return None
+
+    row, col = _cell(latitude, longitude)
+    north_south_nm = GRID_MINUTES
+    east_west_nm = max(0.08, GRID_MINUTES * abs(math.cos(math.radians(latitude))))
+    radius_cells = int(math.ceil(max_distance_nm / min(north_south_nm, east_west_nm))) + 2
+    radius_cells = min(120, max(2, radius_cells))
+
+    best: tuple[float, float, float] | None = None
+    for row_offset in range(-radius_cells, radius_cells + 1):
+        candidate_row = row + row_offset
+        if candidate_row < 0 or candidate_row >= NLATS:
+            continue
+        candidate_latitude = -90.0 + (candidate_row + 0.5) * DELTA_DEG
+        for col_offset in range(-radius_cells, radius_cells + 1):
+            candidate_col = (col + col_offset) % NLONS
+            candidate_longitude = -180.0 + (candidate_col + 0.5) * DELTA_DEG
+            if is_land(candidate_latitude, candidate_longitude):
+                continue
+            distance = haversine_nm(
+                latitude,
+                longitude,
+                candidate_latitude,
+                candidate_longitude,
+            )
+            if distance > max_distance_nm + 1e-9:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, candidate_latitude, candidate_longitude)
+
+    if best is None:
+        return None
+    return {
+        "latitude": best[1],
+        "longitude": best[2],
+        "distance_nm": best[0],
+    }
+
+
 def _great_circle_point(
     start: tuple[float, float], end: tuple[float, float], fraction: float
 ) -> tuple[float, float]:

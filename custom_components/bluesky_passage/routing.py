@@ -23,7 +23,7 @@ from .calculations import haversine_nm, initial_bearing_true, parse_utc
 from .land import is_land, mask_metadata, path_is_water, segment_is_water
 
 EARTH_RADIUS_NM = 3440.065
-ROUTING_ENGINE_VERSION = "isochrone-water-v2"
+ROUTING_ENGINE_VERSION = "isochrone-water-v3"
 
 
 def _finite(value: Any) -> float | None:

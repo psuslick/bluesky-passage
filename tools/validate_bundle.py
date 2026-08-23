@@ -250,7 +250,7 @@ def main() -> int:
 
     routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
     for marker in (
-        'ROUTING_ENGINE_VERSION = "isochrone-water-v2"',
+        'ROUTING_ENGINE_VERSION = "isochrone-water-v3"',
         "segment_is_water",
         "minimum_upwind_twa_deg",
         '"scored_candidate": False',
@@ -266,7 +266,7 @@ def main() -> int:
         errors.append("Bounded Garmin empty-KML handling regression guard is missing")
 
     database_text = (COMPONENT / "database.py").read_text(encoding="utf-8")
-    if '"routing_engine": "isochrone-water-v2"' not in database_text:
+    if '"routing_engine": "isochrone-water-v3"' not in database_text:
         errors.append("Route context does not invalidate pre-v2.3 route/deviation semantics")
 
     land_text = (COMPONENT / "land.py").read_text(encoding="utf-8")
@@ -283,8 +283,20 @@ def main() -> int:
         if marker not in calculations_text:
             errors.append(f"v2.3 route-deviation calculation marker missing: {marker}")
 
-    if 'runtime.coordinator.async_passage_detail' not in (COMPONENT / "websocket.py").read_text(encoding="utf-8"):
+    websocket_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
+    if 'runtime.coordinator.async_passage_detail' not in websocket_text:
         errors.append("Passage detail must refresh live actual-vs-modeled metrics through the coordinator")
+    for marker in ('include_analysis', 'passage_detail_failed'):
+        if marker not in websocket_text:
+            errors.append(f"v2.3.1 passage-detail resilience marker missing: {marker}")
+    if 'include_analysis: !this._admin' not in frontend_text:
+        errors.append("Admin passage editing must bypass supplemental live route analysis")
+    if 'nearest_water_point' not in land_text:
+        errors.append("Coastal endpoint ambiguity resolver is missing")
+    coordinator_text = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")
+    for marker in ('endpoint_adjustments', 'endpoint_notes', 'nearest_water_point'):
+        if marker not in coordinator_text:
+            errors.append(f"v2.3.1 endpoint-resolution marker missing: {marker}")
 
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))

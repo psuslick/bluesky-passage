@@ -204,6 +204,23 @@ class GarminDateTests(unittest.TestCase):
             )
 
 
+class LandEndpointTests(unittest.TestCase):
+    def test_coastal_land_cell_can_resolve_to_nearby_modeled_water(self):
+        # A coarse shoreline cell near Hampton is intentionally classified as
+        # land even though navigable water is within about a nautical mile.
+        point = (37.0, -76.3)
+        self.assertTrue(land.is_land(*point))
+        resolved = land.nearest_water_point(*point, max_distance_nm=2.0)
+        self.assertIsNotNone(resolved)
+        self.assertLess(resolved["distance_nm"], 2.0)
+        self.assertFalse(land.is_land(resolved["latitude"], resolved["longitude"]))
+
+    def test_inland_coordinate_does_not_silently_snap_to_coast(self):
+        self.assertIsNone(
+            land.nearest_water_point(37.5407, -77.4360, max_distance_nm=2.0)
+        )
+
+
 class RoutingTests(unittest.TestCase):
     def test_no_weather_is_explicit_water_valid_reference(self):
         profile = routing.VesselProfile.from_mapping({})
