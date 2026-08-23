@@ -52,9 +52,9 @@ from .feed import (
 from .database import route_context_hash
 from .routing import (
     VesselProfile,
-    candidate_routes,
-    route_sample_requests,
-    score_routes,
+    optimize_sailing_route,
+    route_weather_sample_requests,
+    shortest_water_path,
 )
 from .weather import (
     WeatherAuthenticationError,
@@ -715,8 +715,12 @@ class BlueSkyRuntime:
         )
         profile_data = await self.archive.async_get_vessel_profile()
         profile = VesselProfile.from_mapping(profile_data["profile"])
-        routes = candidate_routes(start, destination)
-        request_metadata = route_sample_requests(routes, departure, profile)
+        # v2.2: the direct geodesic is reference-only. Build a water-valid
+        # geometric baseline first, then search many sailing headings through a
+        # bounded Xweather field. Invalid land/no-go segments never receive a
+        # score.
+        baseline = shortest_water_path(start, destination)
+        request_metadata = route_weather_sample_requests(baseline, departure, profile)
         request_metadata = [
             {
                 **item,
@@ -726,26 +730,22 @@ class BlueSkyRuntime:
             }
             for item in request_metadata
         ]
-        weather_by_candidate: dict[str, list[dict[str, Any]]] = {}
         warnings: list[str] = []
+        samples: list[dict[str, Any]] = []
         if self.weather_client.configured:
-            samples = await self._weather_for_requests(request_metadata)
-            route_lengths = {item["key"]: len(item["coordinates"]) for item in routes}
-            for request, sample in zip(request_metadata, samples):
-                if not (
-                    sample.get("conditions_available")
-                    or sample.get("maritime_available")
-                ):
+            fetched = await self._weather_for_requests(request_metadata)
+            for sample in fetched:
+                if sample.get("conditions_available") or sample.get("maritime_available"):
+                    samples.append(sample)
+                else:
                     warnings.extend(sample.get("warnings") or [])
-                    continue
-                value = dict(sample)
-                value["route_fraction"] = request["coordinate_index"] / max(
-                    route_lengths[request["candidate"]] - 1, 1
-                )
-                weather_by_candidate.setdefault(request["candidate"], []).append(value)
         else:
-            warnings.append("Xweather is not configured; using a great-circle reference")
-        summary = score_routes(routes, profile, weather_by_candidate, departure)
+            warnings.append(
+                "Xweather is not configured; using a water-valid geometric reference without sailing-weather optimization"
+            )
+        summary = optimize_sailing_route(
+            start, destination, departure, profile, baseline, samples
+        )
         actual_query = await self.archive.async_query_points(
             start_utc=_utc(parse_utc(departure)),
             end_utc=detail.get("ended_at_utc"),
@@ -820,7 +820,7 @@ class BlueSkyRuntime:
                 "gaps and reporting interval affect distance and deviation."
             ),
         }
-        summary["warnings"] = sorted(set(warnings))
+        summary["warnings"] = sorted(set([*(summary.get("warnings") or []), *warnings]))
         summary["passage_id"] = passage_id
         summary["departure_at_utc"] = _utc(parse_utc(departure))
         summary["context_hash"] = route_context_hash(
@@ -841,7 +841,7 @@ class BlueSkyRuntime:
         ).hexdigest()
         return await self.archive.async_add_route_version(
             passage_id,
-            "Weather comparison" if summary["weather_used"] else "Direct reference",
+            "Sailing weather search" if summary["method"] == "xweather_sailing_search" else "Water-valid reference",
             summary["method"],
             digest,
             selected["coordinates"],

@@ -55,7 +55,9 @@ class BlueSkyPassagePanel extends HTMLElement {
     this._recorderEnd = "";
     this._busy = "";
     this._notice = null;
-    this._mapZoomDelta = 0;
+    this._mapViews = {};
+    this._mapDrag = null;
+    this._suppressPointClickUntil = 0;
     this._unsubscribe = null;
   }
 
@@ -111,11 +113,11 @@ class BlueSkyPassagePanel extends HTMLElement {
         .notice.error{border-color:rgba(239,83,80,.55);background:rgba(239,83,80,.12)}
         main{padding-top:16px}.card,.metric{background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:13px;box-shadow:var(--ha-card-box-shadow,none)}
         .card{padding:16px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:11px;margin-bottom:14px}
-        .metric{padding:14px;min-height:84px}.metric-label{color:var(--secondary-text-color);font-size:12px;margin-bottom:8px}.metric-value{font-size:21px;font-weight:680;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .metric{padding:14px;min-height:84px}.metric-label{color:var(--secondary-text-color);font-size:12px;margin-bottom:8px}.metric-value{font-size:20px;font-weight:680;overflow-wrap:anywhere}
         .grid-main{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(290px,.9fr);gap:14px}.stack{display:grid;gap:14px}.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-        .map-card{padding:0;overflow:hidden}.map{height:540px;position:relative;overflow:hidden;background:#b9d7e5;user-select:none}.map.small{height:420px}
+        .map-card{padding:0;overflow:hidden}.map{height:540px;position:relative;overflow:hidden;background:#b9d7e5;user-select:none;touch-action:none;cursor:grab}.map.dragging{cursor:grabbing}.map.small{height:420px}
         .tiles,.overlay{position:absolute;inset:0}.tiles img{position:absolute;width:256px;height:256px;pointer-events:none}.overlay{width:100%;height:100%;overflow:visible}
-        .map-controls{position:absolute;left:10px;top:10px;z-index:4;display:flex;flex-direction:column;gap:5px}.map-controls button{width:44px;height:44px;border:0;border-radius:7px;background:rgba(28,31,34,.9);color:#fff;font-size:18px}
+        .map-controls{position:absolute;left:10px;top:10px;z-index:4;display:grid;grid-template-columns:44px 44px 44px;gap:5px}.map-controls button{width:44px;height:44px;border:0;border-radius:7px;background:rgba(28,31,34,.9);color:#fff;font-size:18px}.map-controls .wide{grid-column:span 3}.map-controls .spacer{visibility:hidden}
         .map-attribution{position:absolute;right:3px;bottom:2px;z-index:4;background:rgba(255,255,255,.8);color:#222;padding:2px 4px;font-size:10px}.map-attribution a{color:#1565c0}
         .legend{position:absolute;left:9px;bottom:10px;z-index:4;padding:6px 8px;border-radius:7px;background:rgba(0,0,0,.7);color:white;font-size:11px}.swatch{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 8px}.swatch:first-child{margin-left:0}
         .record{min-height:180px}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.detail-grid .wide{grid-column:1/-1}.detail-label{font-size:11px;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.04em}.detail-value{margin-top:3px;overflow-wrap:anywhere}
@@ -142,10 +144,13 @@ class BlueSkyPassagePanel extends HTMLElement {
       const target = event.target.closest("[data-action]");
       if (!target) return;
       const action = target.dataset.action;
+      if (action === "point" && Date.now() < this._suppressPointClickUntil) return;
       const actions = {
         tab: () => this._setTab(target.dataset.tab), refresh: () => this._refresh(),
-        load: () => this._loadQuery(true), zoomin: () => { this._mapZoomDelta += 1; this._renderContent(); },
-        zoomout: () => { this._mapZoomDelta -= 1; this._renderContent(); }, fit: () => { this._mapZoomDelta = 0; this._renderContent(); },
+        load: () => this._loadQuery(true), zoomin: () => this._zoomMap(target.dataset.map, 1),
+        zoomout: () => this._zoomMap(target.dataset.map, -1), fit: () => this._fitMap(target.dataset.map),
+        panleft: () => this._panMap(target.dataset.map, -0.25, 0), panright: () => this._panMap(target.dataset.map, 0.25, 0),
+        panup: () => this._panMap(target.dataset.map, 0, -0.25), pandown: () => this._panMap(target.dataset.map, 0, 0.25),
         point: () => this._selectPoint(Number(target.dataset.index)),
         "range-select": () => { this._selectRange = !this._selectRange; this._selectionStart = null; this._selectionEnd = null; this._renderContent(); },
         "clear-range": () => this._clearPointRange(), weather: () => this._weather(),
@@ -188,6 +193,10 @@ class BlueSkyPassagePanel extends HTMLElement {
       const next = tabs[(tabs.indexOf(this._tab) + direction + tabs.length) % tabs.length];
       this._setTab(next); this.shadowRoot.querySelector(`[data-tab="${next}"]`)?.focus();
     });
+    this.shadowRoot.addEventListener("pointerdown", (event) => this._startMapDrag(event));
+    this.shadowRoot.addEventListener("pointermove", (event) => this._moveMapDrag(event));
+    this.shadowRoot.addEventListener("pointerup", (event) => this._endMapDrag(event));
+    this.shadowRoot.addEventListener("pointercancel", (event) => this._endMapDrag(event));
   }
 
   async _call(name, data = {}) {
@@ -215,7 +224,7 @@ class BlueSkyPassagePanel extends HTMLElement {
 
   async _loadQuery(fit = false) {
     if (!this._hass) return;
-    if (fit) this._mapZoomDelta = 0;
+    if (fit) this._mapViews = {};
     const payload = { range: this._range, source: this._source, max_points: 4000, ...this._customRange() };
     if (this._range === "passage") {
       if (!this._passageId) throw new Error("Choose a passage.");
@@ -327,7 +336,7 @@ class BlueSkyPassagePanel extends HTMLElement {
   }
 
   _mapHtml(id, small) {
-    return `<div id="${id}" class="map ${small ? "small" : ""}"><div class="tiles"></div><svg class="overlay" role="img" aria-label="Archived vessel track"></svg><div class="map-controls"><button data-action="zoomin" title="Zoom in">+</button><button data-action="zoomout" title="Zoom out">−</button><button data-action="fit" title="Fit track">⌖</button></div><div class="legend"><i class="swatch" style="background:${COLORS.speed}"></i>${esc(this._sourceLabel(this._source))}${this._mapMode === "weather" ? `<i class="swatch" style="background:${COLORS.wind}"></i>Modeled wind` : ""}</div><div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div></div>`;
+    return `<div id="${id}" class="map ${small ? "small" : ""}" data-map-id="${id}"><div class="tiles"></div><svg class="overlay" role="img" aria-label="Archived vessel track and comparison route"></svg><div class="map-controls"><button data-action="zoomout" data-map="${id}" title="Zoom out">−</button><button data-action="panup" data-map="${id}" title="Pan north">↑</button><button data-action="zoomin" data-map="${id}" title="Zoom in">+</button><button data-action="panleft" data-map="${id}" title="Pan west">←</button><button data-action="fit" data-map="${id}" title="Fit track">⌖</button><button data-action="panright" data-map="${id}" title="Pan east">→</button><span class="spacer"></span><button data-action="pandown" data-map="${id}" title="Pan south">↓</button><span class="spacer"></span></div><div class="legend"><i class="swatch" style="background:${COLORS.speed}"></i>${esc(this._sourceLabel(this._source))}${this._mapMode === "weather" ? `<i class="swatch" style="background:${COLORS.wind}"></i>Modeled wind` : ""}</div><div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div></div>`;
   }
 
   _recordHtml(point) {
@@ -377,7 +386,7 @@ class BlueSkyPassagePanel extends HTMLElement {
     const passages = this._state.passages || [];
     if (this._passageDraft) return this._passageFormHtml();
     return `<div class="section-title"><div><h2>Passages</h2><div class="muted">Editable time annotations over one continuous archive. Open-ended means “from this date onward”; it is not a live operating mode.</div></div>${this._admin ? `<button class="button primary" data-action="new-passage">Create passage</button>` : ""}</div>
-      <section class="card table-wrap"><table><thead><tr><th>Name</th><th>Time range</th><th>Destination</th><th>Coverage</th><th></th></tr></thead><tbody>${passages.length ? passages.map((item) => `<tr><td><strong>${esc(item.name)}</strong><br><span class="muted">${item.ended_at_utc ? "Specific range" : "Open-ended range"}</span></td><td>${local(item.started_at_utc)}<br>${item.ended_at_utc ? `to ${local(item.ended_at_utc)}` : "No end date"}</td><td>${esc(item.destination_name || "—")}</td><td>${Number(item.report_count || 0).toLocaleString()} reports</td><td><div class="row"><button class="button small" data-action="edit-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._admin ? "View / edit" : "View"}</button>${this._admin && item.destination_name ? `<button class="button small" data-action="plan-route" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._busy || "Create route comparison"}</button>` : ""}${this._admin ? `<button class="button small danger" data-action="delete-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>Delete</button>` : ""}</div></td></tr>`).join("") : `<tr><td colspan="5"><div class="empty">No passage annotations yet. Your Garmin archive continues independently.</div></td></tr>`}</tbody></table></section>
+      <section class="card table-wrap"><table><thead><tr><th>Name</th><th>Time range</th><th>Destination</th><th>Coverage</th><th></th></tr></thead><tbody>${passages.length ? passages.map((item) => `<tr><td><strong>${esc(item.name)}</strong><br><span class="muted">${item.ended_at_utc ? "Specific range" : "Open-ended range"}</span></td><td>${local(item.started_at_utc)}<br>${item.ended_at_utc ? `to ${local(item.ended_at_utc)}` : "No end date"}</td><td>${esc(item.destination_name || "—")}</td><td>${Number(item.report_count || 0).toLocaleString()} reports</td><td><div class="row"><button class="button small" data-action="edit-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._admin ? "View / edit" : "View"}</button>${this._admin && item.destination_name ? `<button class="button small" data-action="plan-route" data-id="${item.id}" ${this._busy ? "disabled" : ""}>${this._busy || "Calculate sailing route"}</button>` : ""}${this._admin ? `<button class="button small danger" data-action="delete-passage" data-id="${item.id}" ${this._busy ? "disabled" : ""}>Delete</button>` : ""}</div></td></tr>`).join("") : `<tr><td colspan="5"><div class="empty">No passage annotations yet. Your Garmin archive continues independently.</div></td></tr>`}</tbody></table></section>
       ${this._passageDetail ? `<div class="grid-main" style="margin-top:14px"><section class="card map-card">${this._mapHtml("passage-map",true)}</section><section class="card"><h2>${esc(this._passageDetail.name)}</h2><p>${local(this._passageDetail.started_at_utc)} ${this._passageDetail.ended_at_utc ? `to ${local(this._passageDetail.ended_at_utc)}` : "onward"}</p><p>Destination: ${esc(this._passageDetail.destination_name || "not set")} · ${Number(this._passageDetail.coverage?.report_count || 0).toLocaleString()} reports</p>${this._passageDetail.route ? this._routeHtml(this._passageDetail.route) : `<p class="muted">No calculated comparison is saved for this passage.</p>`}</section></div>` : ""}`;
   }
 
@@ -441,17 +450,20 @@ class BlueSkyPassagePanel extends HTMLElement {
   async _deletePassage(id) { if (!confirm("Delete this passage annotation? Raw reports and weather samples remain.")) return; try { await this._call("passage_delete", { passage_id: id }); await this._load(false); this._show("Passage metadata deleted; raw reports retained."); } catch (error) { this._show(error.message || String(error), true); } }
 
   async _planRoute(id) {
-    try { this._busy = "Calculating comparison…"; this._show("Calculating and caching the route comparison…"); this._renderContent(); const route = await this._call("route_plan", { passage_id: id }); this._passageDetail = await this._call("passage_detail", { passage_id: id }); this._query = await this._call("points", { range:"passage", passage_id:id, source:"garmin_mapshare", max_points:4000 }); this._selectedIndex = this._query.points.length ? this._query.points.length - 1 : -1; this._show(route.summary?.weather_used ? "Weather-informed route comparison saved." : "Great-circle reference saved. Xweather was not available, so no weather optimization is claimed."); this._renderContent(); }
+    try { this._busy = "Calculating route…"; this._show("Building a water-valid, sailing-aware weather route…"); this._renderContent(); const route = await this._call("route_plan", { passage_id: id }); this._passageDetail = await this._call("passage_detail", { passage_id: id }); this._query = await this._call("points", { range:"passage", passage_id:id, source:"garmin_mapshare", max_points:4000 }); this._selectedIndex = this._query.points.length ? this._query.points.length - 1 : -1; this._show(route.summary?.method === "xweather_sailing_search" ? "Water-valid sailing-weather route saved." : "Water-valid reference saved. No weather sailing optimization is claimed."); this._renderContent(); }
     catch (error) { this._show(error.message || String(error), true); } finally { this._busy = ""; this._renderContent(); }
   }
 
   _routeHtml(route) {
-    const s = route.summary || {}; const selected = s.selected || {}; const actual=s.actual || {};
-    const contextWarning = route.context_status && route.context_status !== "current" ? `<div class="notice">${esc(route.context_warning || "Recalculate this comparison before using it.")}</div>` : "";
-    return `<h2>Route comparison</h2>${contextWarning}<div class="metrics">${this._metric("Method", s.method === "xweather_comparison" ? "Xweather comparison" : "Great-circle reference")}${this._metric("Distance", num(selected.distance_nm, 1, " nmi"))}${this._metric("Estimated duration", num(selected.estimated_hours, 1, " h"))}${this._metric("Estimated arrival", local(selected.eta_utc))}</div>
-      <h3>Actual track ${actual.through_report_utc ? `through ${local(actual.through_report_utc)}` : "within the saved analysis range"}</h3><div class="metrics">${this._metric("Recorded distance",num(actual.recorded_distance_nm,1," nmi"))}${this._metric("Observed elapsed",num(actual.elapsed_hours,1," h"))}${this._metric("Range remaining",num(actual.range_remaining_nm,1," nmi"))}${this._metric("Max deviation from direct",num(actual.max_cross_track_from_direct_nm,1," nmi"))}</div><p class="muted">${esc(actual.coverage_note || "Actual analysis requires archived Garmin reports.")}</p>
-      <p class="muted">${esc(s.disclaimer || "Comparison only—not a navigable route.")}</p>${s.warnings?.length ? `<p class="danger-text">${s.warnings.map(esc).join(" · ")}</p>` : ""}
-      <div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Distance</th><th>Estimated hours</th><th>Risk score</th><th>Model coverage</th></tr></thead><tbody>${(s.candidates || []).map((item) => `<tr><td>${esc(item.label)}${item.key === selected.key ? " · selected" : ""}</td><td>${num(item.distance_nm, 1, " nmi")}</td><td>${num(item.estimated_hours, 1)}</td><td>${num(item.risk_score, 1)}</td><td>${item.weather_coverage_segments ?? 0} segments</td></tr>`).join("")}</tbody></table></div>`;
+    const s = route.summary || {}; const selected = s.selected || {}; const actual=s.actual || {}; const reference=s.reference || {}; const baseline=s.baseline || {};
+    const contextWarning = route.context_status && route.context_status !== "current" ? `<div class="notice">${esc(route.context_warning || "Recalculate this route before using it for analysis.")}</div>` : "";
+    const method = s.method === "xweather_sailing_search" ? "Sailing weather search" : "Water-valid reference";
+    const directState = reference.water_valid === false ? "Rejected · crosses modeled land" : reference.water_valid === true ? "Water-valid reference only" : "Not evaluated";
+    return `<h2>Sailing route analysis</h2>${contextWarning}<div class="metrics">${this._metric("Method", method)}${this._metric("Selected distance", num(selected.distance_nm, 1, " nmi"))}${this._metric("Estimated duration", num(selected.estimated_hours, 1, " h"))}${this._metric("Estimated arrival", local(selected.eta_utc))}</div>
+      <div class="coverage"><strong>Hard validity checks</strong><p>Selected path: ${selected.land_valid === false ? '<span class="danger-text">invalid</span>' : "water-valid in bundled land mask"} · no-go violations: ${selected.no_go_violations == null ? "not evaluated" : Number(selected.no_go_violations)} · assumed minimum upwind TWA: ${num(s.profile?.no_go_angle_deg,1,"°")}</p><p><strong>Direct geodesic:</strong> ${esc(directState)} · ${num(reference.distance_nm,1," nmi")}. The direct line is never a scored candidate.</p><p><strong>Shortest water reference:</strong> ${num(baseline.distance_nm,1," nmi")} · reference only.</p></div>
+      <h3 style="margin-top:14px">Actual track ${actual.through_report_utc ? `through ${local(actual.through_report_utc)}` : "within the saved analysis range"}</h3><div class="metrics">${this._metric("Recorded distance",num(actual.recorded_distance_nm,1," nmi"))}${this._metric("Observed elapsed",num(actual.elapsed_hours,1," h"))}${this._metric("Range remaining",num(actual.range_remaining_nm,1," nmi"))}${this._metric("Max deviation from direct",num(actual.max_cross_track_from_direct_nm,1," nmi"))}</div><p class="muted">${esc(actual.coverage_note || "Actual analysis requires archived Garmin reports.")}</p>
+      <p class="muted">${esc(s.disclaimer || "Planning/analysis aid only—not a navigable route.")}</p>${s.warnings?.length ? `<p class="danger-text">${s.warnings.map(esc).join(" · ")}</p>` : ""}
+      <div class="table-wrap"><table><thead><tr><th>Searched result</th><th>Distance</th><th>Estimated hours</th><th>Risk</th><th>Major turns</th><th>Weather steps</th></tr></thead><tbody>${(s.candidates || []).map((item) => `<tr><td>${esc(item.label)}${item.key === selected.key ? " · selected" : ""}</td><td>${num(item.distance_nm, 1, " nmi")}</td><td>${num(item.estimated_hours, 1)}</td><td>${num(item.risk_score, 1)}</td><td>${item.maneuvers ?? "—"}</td><td>${item.weather_coverage_steps ?? 0}</td></tr>`).join("")}</tbody></table></div>`;
   }
 
   _settingsHtml() {
@@ -463,7 +475,7 @@ class BlueSkyPassagePanel extends HTMLElement {
       <section class="card" style="margin-top:14px"><div class="section-title"><div><h2>Garmin historical backfill</h2><div class="muted">Preview first. Requests run in resumable seven-day chunks; duplicates are ignored. Commit creates one rollbackable import batch.</div></div></div><div class="toolbar"><label>Start date<input id="backfill-start" type="date" value="${esc(this._backfillStart)}"></label><label>End date<input id="backfill-end" type="date" value="${esc(this._backfillEnd)}"></label><button class="button primary" data-action="backfill-preview" ${job && ["pending","running"].includes(job.status) ? "disabled" : ""}>Preview Garmin availability</button></div>
       ${job ? `<div class="coverage ${job.status === "failed" ? "warning" : ""}"><strong>${esc(job.phase)} job #${job.id} · ${esc(job.status)}</strong><p class="muted">Requested range: ${local(job.start_utc)} → ${local(job.end_utc)} · ${Number(job.chunks_total || 0).toLocaleString()} chunk${Number(job.chunks_total || 0) === 1 ? "" : "s"}</p><div class="progress"><span style="width:${progress}%"></span></div><p>${job.chunks_completed}/${job.chunks_total} chunks · ${Number(job.records_returned || 0).toLocaleString()} returned · ${Number(job.records_inserted || 0).toLocaleString()} ${job.phase === "preview" ? "expected new" : "inserted"} · ${Number(job.records_duplicated || 0).toLocaleString()} already archived</p>${job.error ? `<p class="danger-text">${esc(job.error)}</p>` : ""}<div class="row">${job.phase === "preview" && job.status === "completed" ? `<button class="button primary" data-action="backfill-commit" data-id="${job.id}">Import previewed range</button>` : ""}${job.status === "failed" ? `<button class="button" data-action="backfill-resume" data-id="${job.id}">Resume failed chunk</button>` : ""}${["pending","running","failed"].includes(job.status) ? `<button class="button danger" data-action="backfill-cancel" data-id="${job.id}">Cancel</button>` : ""}</div></div>` : ""}</section>
       <section class="card" style="margin-top:14px"><h2>Vessel performance profile</h2><p class="muted">All fields are optional. Missing values use an observed, hull-speed, or generic fallback in that order. Saving recalculates the selected passage route when a passage context is chosen.</p><div class="form-grid">
-      ${this._profileField("Vessel name", "vessel_name", profile.vessel_name)}${this._profileField("Hull configuration", "hull_configuration", profile.hull_configuration)}${this._profileField("Length overall (ft)", "length_overall_ft", profile.length_overall_ft, true)}${this._profileField("Waterline length (ft)", "waterline_length_ft", profile.waterline_length_ft, true)}${this._profileField("Beam (ft)", "beam_ft", profile.beam_ft, true)}${this._profileField("Draft (ft)", "draft_ft", profile.draft_ft, true)}${this._profileField("Displacement (lb)", "displacement_lb", profile.displacement_lb, true)}${this._profileField("Sail area (sq ft)", "sail_area_sqft", profile.sail_area_sqft, true)}${this._profileField("Engine cruise (kn)", "engine_cruise_speed_kn", profile.engine_cruise_speed_kn, true)}${this._profileField("Observed cruise (kn)", "observed_cruise_speed_kn", profile.observed_cruise_speed_kn, true)}${this._profileField("Comfortable wave max (m)", "max_comfortable_wave_m", profile.max_comfortable_wave_m, true)}
+      ${this._profileField("Vessel name", "vessel_name", profile.vessel_name)}${this._profileField("Hull configuration", "hull_configuration", profile.hull_configuration)}${this._profileField("Length overall (ft)", "length_overall_ft", profile.length_overall_ft, true)}${this._profileField("Waterline length (ft)", "waterline_length_ft", profile.waterline_length_ft, true)}${this._profileField("Beam (ft)", "beam_ft", profile.beam_ft, true)}${this._profileField("Draft (ft)", "draft_ft", profile.draft_ft, true)}${this._profileField("Displacement (lb)", "displacement_lb", profile.displacement_lb, true)}${this._profileField("Sail area (sq ft)", "sail_area_sqft", profile.sail_area_sqft, true)}${this._profileField("Engine cruise (kn)", "engine_cruise_speed_kn", profile.engine_cruise_speed_kn, true)}${this._profileField("Observed cruise (kn)", "observed_cruise_speed_kn", profile.observed_cruise_speed_kn, true)}${this._profileField("Comfortable wave max (m)", "max_comfortable_wave_m", profile.max_comfortable_wave_m, true)}${this._profileField("Minimum upwind TWA / no-go (deg)", "minimum_upwind_twa_deg", profile.minimum_upwind_twa_deg, true)}
       <label class="span4">Polar table JSON (optional)<textarea id="profile-polar" placeholder='[{"twa_deg":60,"tws_kn":12,"boat_speed_kn":6.2}]'>${esc(profile.polar_table?.length ? JSON.stringify(profile.polar_table, null, 2) : "")}</textarea></label></div><div class="row"><label>Recalculate passage<select id="profile-passage"><option value="">None</option>${(this._state.passages || []).map((item) => `<option value="${item.id}" ${this._passageId === item.id ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><button class="button primary" data-action="save-profile">Save performance profile</button></div></section>
       ${this._recorderRecoveryHtml()}
       <section class="card" style="margin-top:14px"><h2>Manual source import</h2><p class="muted">Use only when Garmin backfill cannot supply a source. JSON/GeoJSON and GPX rows are source-labelled and rollbackable.</p><div class="toolbar"><label>File<input id="history-file" type="file" accept=".json,.geojson,.gpx,.xml"></label><label>Source<select id="history-source"><option value="predictwind_snapshot">PredictWind snapshot</option><option value="gpx_import">GPX import</option><option value="csv_import">CSV-normalized JSON</option></select></label><button class="button" data-action="import-history">Import file</button></div><div class="table-wrap"><table><thead><tr><th>Batch</th><th>Source</th><th>Status</th><th>Rows</th><th></th></tr></thead><tbody>${(this._state.imports || []).map((item) => `<tr><td>${esc(item.filename)}</td><td>${esc(item.source)}</td><td>${esc(item.status)}</td><td>${item.rows_inserted}/${item.rows_seen}</td><td>${["completed","failed"].includes(item.status) ? `<button class="button small danger" data-action="rollback-import" data-id="${item.id}">Rollback</button>` : ""}</td></tr>`).join("")}</tbody></table></div></section>
@@ -656,7 +668,7 @@ class BlueSkyPassagePanel extends HTMLElement {
 
   async _saveProfile() {
     try {
-      const keys = ["vessel_name","hull_configuration","length_overall_ft","waterline_length_ft","beam_ft","draft_ft","displacement_lb","sail_area_sqft","engine_cruise_speed_kn","observed_cruise_speed_kn","max_comfortable_wave_m"];
+      const keys = ["vessel_name","hull_configuration","length_overall_ft","waterline_length_ft","beam_ft","draft_ft","displacement_lb","sail_area_sqft","engine_cruise_speed_kn","observed_cruise_speed_kn","max_comfortable_wave_m","minimum_upwind_twa_deg"];
       const profile = {}; for (const key of keys) { const value = this.shadowRoot.getElementById(`profile-${key}`).value.trim(); if (value !== "") profile[key] = ["vessel_name","hull_configuration"].includes(key) ? value : Number(value); }
       const polar = this.shadowRoot.getElementById("profile-polar").value.trim(); if (polar) { profile.polar_table = JSON.parse(polar); if (!Array.isArray(profile.polar_table)) throw new Error("Polar table JSON must be an array."); }
       const passage = this.shadowRoot.getElementById("profile-passage").value;
@@ -712,22 +724,75 @@ class BlueSkyPassagePanel extends HTMLElement {
   }
   async _clearPointRange() { this._selectionStart = null; this._selectionEnd = null; this._selectRange = false; await this._loadQuery(true); }
 
+  _routeForMap(id) {
+    if (id === "passage-map" && this._passageDetail?.route?.context_status === "current") return this._passageDetail.route;
+    return null;
+  }
+
   _drawMap(id, route = null) {
     const map = this.shadowRoot.getElementById(id); if (!map) return;
     const points = (this._query.points || []).filter((item) => finite(item.latitude) && finite(item.longitude));
     const routeCoordinates = route?.coordinates || [];
+    const summary = route?.summary || {};
+    const referenceCoordinates = summary.reference?.coordinates || [];
+    const baselineCoordinates = summary.baseline?.coordinates || [];
+    const alternativeCoordinates = (summary.candidates || []).filter((item) => item.key !== summary.selected?.key).map((item) => item.coordinates || []);
     const all = [...points.map((p) => [Number(p.latitude), Number(p.longitude)]), ...routeCoordinates.map((p) => [Number(p[1]), Number(p[0])])];
     if (!all.length) { map.querySelector(".tiles").innerHTML = ""; map.querySelector(".overlay").innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#345">No valid positions in this range</text>`; return; }
-    const width = map.clientWidth || 900, height = map.clientHeight || 500; const view = this._fitView(all, width, height); const zoom = Math.max(1, Math.min(18, view.zoom + this._mapZoomDelta)); const center = this._project(view.lat, view.lon, zoom); const world = 256 * 2 ** zoom;
+    const width = map.clientWidth || 900, height = map.clientHeight || 500; const fitted = this._fitView(all, width, height);
+    const state = this._mapViews[id] || { lat:fitted.lat, lon:fitted.lon, zoom:fitted.zoom };
+    state.zoom = Math.max(1, Math.min(18, Number(state.zoom ?? fitted.zoom)));
+    state.lat = finite(state.lat) ? Number(state.lat) : fitted.lat; state.lon = finite(state.lon) ? Number(state.lon) : fitted.lon;
+    this._mapViews[id] = state;
+    const zoom = state.zoom; const center = this._project(state.lat, state.lon, zoom); const world = 256 * 2 ** zoom;
     const tiles = []; const left = center.x - width/2, top = center.y - height/2; const minTileX = Math.floor(left/256), maxTileX = Math.floor((left+width)/256), minTileY = Math.floor(top/256), maxTileY = Math.floor((top+height)/256);
     for (let tx=minTileX; tx<=maxTileX; tx+=1) for (let ty=minTileY; ty<=maxTileY; ty+=1) { if (ty < 0 || ty >= 2**zoom) continue; const wrapped = ((tx % 2**zoom)+2**zoom)%2**zoom; tiles.push(`<img alt="" src="https://tile.openstreetmap.org/${zoom}/${wrapped}/${ty}.png" style="left:${tx*256-left}px;top:${ty*256-top}px">`); }
-    map.querySelector(".tiles").innerHTML = tiles.join(""); const xy = (lat,lon) => { const p=this._project(lat,lon,zoom); let x=p.x-left; if (x < -world/2) x+=world; if (x > width+world/2) x-=world; return [x,p.y-top]; };
+    map.querySelector(".tiles").innerHTML = tiles.join(""); const xy = (lat,lon) => { const p=this._project(lat,lon,zoom); let x=p.x-left; while (x < -world/2) x+=world; while (x > width+world/2) x-=world; return [x,p.y-top]; };
     const segments=[]; let current=[]; points.forEach((p) => { if (p.break_before && current.length) { segments.push(current); current=[]; } current.push(xy(Number(p.latitude),Number(p.longitude))); }); if (current.length) segments.push(current);
     const tracks = segments.map((segment) => `<polyline points="${segment.map((p)=>p.join(",")).join(" ")}" fill="none" stroke="${COLORS.speed}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`).join("");
-    const routeLine = routeCoordinates.length ? `<polyline points="${routeCoordinates.map((p)=>xy(Number(p[1]),Number(p[0])).join(",")).join(" ")}" fill="none" stroke="#66bb6a" stroke-width="3" stroke-dasharray="9 6"/>` : "";
+    const polyline = (coordinates, stroke, widthValue, dash = "", opacity = 1) => coordinates.length ? `<polyline points="${coordinates.map((p)=>xy(Number(p[1]),Number(p[0])).join(",")).join(" ")}" fill="none" stroke="${stroke}" stroke-width="${widthValue}" ${dash ? `stroke-dasharray="${dash}"` : ""} opacity="${opacity}" stroke-linecap="round" stroke-linejoin="round"/>` : "";
+    const referenceLine = polyline(referenceCoordinates, summary.reference?.water_valid === false ? "#ef5350" : "#90a4ae", 2, "3 7", .9);
+    const baselineLine = polyline(baselineCoordinates, "#ffb300", 2, "7 6", .7);
+    const alternatives = alternativeCoordinates.map((coordinates)=>polyline(coordinates,"#66bb6a",2,"4 5",.35)).join("");
+    const routeLine = polyline(routeCoordinates, "#43a047", 4, "", 1);
     const dots = points.map((p,pointIndex) => { const index=this._query.points.findIndex((item)=>item.id===p.id); const [x,y]=xy(Number(p.latitude),Number(p.longitude)); const selected=index===this._selectedIndex; const boundary=[this._selectionStart,this._selectionEnd].includes(p.id); const current=pointIndex===points.length-1; const visible=current&&finite(p.cog_true)?`<path d="M0 -11 L7 8 L0 5 L-7 8 Z" transform="translate(${x} ${y}) rotate(${Number(p.cog_true)})" fill="${boundary?"#ffeb3b":COLORS.speed}" stroke="#fff" stroke-width="2"/>`:`<circle cx="${x}" cy="${y}" r="${boundary?9:selected?8:5}" fill="${boundary?"#ffeb3b":COLORS.speed}" stroke="#fff" stroke-width="${selected||boundary?2:1}"/>`; return `<g class="track-point" data-action="point" data-index="${index}" tabindex="0" role="button" aria-label="Report ${esc(local(p.recorded_at_utc))}">${visible}<circle cx="${x}" cy="${y}" r="22" fill="transparent"><title>${esc(local(p.recorded_at_utc))}</title></circle></g>`; }).join("");
     const arrows = this._mapMode === "weather" ? (this._query.weather_samples || []).filter((s)=>finite(s.wind_dir_deg)).map((s)=>{const [x,y]=xy(Number(s.latitude),Number(s.longitude)); return `<g transform="translate(${x} ${y}) rotate(${Number(s.wind_dir_deg)})"><path d="M0 9 L0 -9 M0 -9 L-4 -3 M0 -9 L4 -3" stroke="${COLORS.wind}" stroke-width="2" fill="none"><title>Modeled wind ${this._speed(s.wind_speed_kn)}</title></path></g>`;}).join("") : "";
-    map.querySelector(".overlay").setAttribute("viewBox",`0 0 ${width} ${height}`); map.querySelector(".overlay").innerHTML = `${tracks}${routeLine}${arrows}${dots}`;
+    map.querySelector(".overlay").setAttribute("viewBox",`0 0 ${width} ${height}`); map.querySelector(".overlay").innerHTML = `${tracks}${referenceLine}${baselineLine}${alternatives}${routeLine}${arrows}${dots}`;
+    const legend = [`<i class="swatch" style="background:${COLORS.speed}"></i>${esc(this._sourceLabel(this._source))}`];
+    if (routeCoordinates.length) legend.push(`<i class="swatch" style="background:#43a047"></i>Selected sailing path`);
+    if (referenceCoordinates.length) legend.push(`<i class="swatch" style="background:${summary.reference?.water_valid === false ? "#ef5350" : "#90a4ae"}"></i>Direct reference${summary.reference?.water_valid === false ? " · crosses land" : ""}`);
+    if (this._mapMode === "weather") legend.push(`<i class="swatch" style="background:${COLORS.wind}"></i>Modeled wind`);
+    map.querySelector(".legend").innerHTML = legend.join("");
+  }
+
+  _zoomMap(id, delta) {
+    if (!id) return; const map=this.shadowRoot.getElementById(id); if (!map) return;
+    const state=this._mapViews[id]; if (!state) { this._drawMap(id,this._routeForMap(id)); return; }
+    state.zoom=Math.max(1,Math.min(18,state.zoom+delta)); this._drawMap(id,this._routeForMap(id));
+  }
+  _fitMap(id) { if (!id) return; delete this._mapViews[id]; this._drawMap(id,this._routeForMap(id)); }
+  _panMap(id, xFraction, yFraction) {
+    const map=this.shadowRoot.getElementById(id); const state=this._mapViews[id]; if (!map||!state) return;
+    const center=this._project(state.lat,state.lon,state.zoom); const next=this._unproject(center.x+map.clientWidth*xFraction,center.y+map.clientHeight*yFraction,state.zoom);
+    state.lat=next.lat;state.lon=next.lon;this._drawMap(id,this._routeForMap(id));
+  }
+  _startMapDrag(event) {
+    const map=event.target.closest?.(".map"); if (!map || event.button > 0) return;
+    const id=map.dataset.mapId; const state=this._mapViews[id]; if (!state) return;
+    const center=this._project(state.lat,state.lon,state.zoom);
+    this._mapDrag={id,pointerId:event.pointerId,startX:event.clientX,startY:event.clientY,centerX:center.x,centerY:center.y,moved:false};
+    map.classList.add("dragging"); try{map.setPointerCapture(event.pointerId);}catch(_error){} event.preventDefault();
+  }
+  _moveMapDrag(event) {
+    const drag=this._mapDrag; if (!drag || drag.pointerId!==event.pointerId) return;
+    const map=this.shadowRoot.getElementById(drag.id); const state=this._mapViews[drag.id]; if(!map||!state)return;
+    const dx=event.clientX-drag.startX,dy=event.clientY-drag.startY;if(Math.hypot(dx,dy)>5)drag.moved=true;
+    const next=this._unproject(drag.centerX-dx,drag.centerY-dy,state.zoom);state.lat=next.lat;state.lon=next.lon;
+    this._drawMap(drag.id,this._routeForMap(drag.id)); event.preventDefault();
+  }
+  _endMapDrag(event) {
+    const drag=this._mapDrag; if(!drag||drag.pointerId!==event.pointerId)return; const map=this.shadowRoot.getElementById(drag.id);
+    if(drag.moved)this._suppressPointClickUntil=Date.now()+350; map?.classList.remove("dragging"); try{map?.releasePointerCapture(event.pointerId);}catch(_error){} this._mapDrag=null;
   }
 
   _fitView(coordinates, width, height) {
@@ -739,6 +804,7 @@ class BlueSkyPassagePanel extends HTMLElement {
     for(let z=16;z>=1;z-=1){const a=this._project(latMax,lon,z),b=this._project(latMin,lon,z);const xSpan=256*2**z*lonSpan/360;if(xSpan<width*.82&&Math.abs(b.y-a.y)<height*.78)return{lat,lon,zoom:z};} return{lat,lon,zoom:1};
   }
   _project(lat,lon,zoom){const scale=256*2**zoom;const bounded=Math.max(-85.0511,Math.min(85.0511,lat));const sin=Math.sin(bounded*Math.PI/180);return{x:(lon+180)/360*scale,y:(.5-Math.log((1+sin)/(1-sin))/(4*Math.PI))*scale};}
+  _unproject(x,y,zoom){const scale=256*2**zoom;const lon=((x/scale*360+180)%360+360)%360-180;const n=Math.PI-2*Math.PI*y/scale;const lat=180/Math.PI*Math.atan(Math.sinh(n));return{lat:Math.max(-85.0511,Math.min(85.0511,lat)),lon};}
 
   _speedValue(value) { if (!finite(value)) return null; const knots=Number(value); return this._speedUnit === "km/h" ? knots*1.852 : this._speedUnit === "mph" ? knots*1.150779 : knots; }
   _heightValue(value) { if (!finite(value)) return null; return this._heightUnit === "ft" ? Number(value)*3.28084 : Number(value); }

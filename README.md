@@ -1,79 +1,103 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.1.1 is a Home Assistant custom integration and responsive
-sidebar panel for locally archiving and analyzing positions exposed through a
-Garmin MapShare feed. It provides a continuous, non-purging source archive;
-editable passage annotations; linked maps and charts; optional on-demand
-Xweather wind/marine data; and a conservative comparison-route generator.
+BlueSky Passage 2.2.0 is a Home Assistant custom integration and responsive
+sidebar panel for continuously archiving Garmin MapShare positions and analyzing
+passages. It combines a non-purging local source archive, editable passage
+annotations, linked maps/charts, optional Xweather wind/marine data, an
+on-demand PredictWind view, and a water-constrained sailing-analysis engine.
 
-**2.1.1 maintenance fixes:** Garmin backfill date selections now survive panel redraws, the running job shows its exact requested range and chunk count, duplicate preview starts are blocked while a job is active, and Home Assistant integration options no longer loop back to the sidebar panel.
+## What changed in 2.2.0
+
+Version 2.2.0 replaces the v2.1 three-corridor route scorer after that design
+proved capable of scoring physically impossible routes. The direct geodesic is
+now a reference only and is never a scored sailing candidate. Every scored
+route segment must remain off the bundled dry-land mask; sailing headings inside
+the vessel's no-go angle are rejected rather than assigned an artificially slow
+straight-line speed. The weather search advances many candidate headings through
+time, uses vessel polar/fallback performance, adds Xweather current as a vector
+to through-water boat velocity, considers wind/waves and comfort penalties, and
+keeps materially different alternatives.
+
+The same release also carries forward the v2.1.1 integration-options and Garmin
+backfill form fixes, allows valid empty historical Garmin KML intervals without
+aborting a multi-chunk backfill, adds pointer/touch map panning plus accessible
+pan controls, prevents route-card text truncation, and makes the actual track,
+direct reference, shortest-water reference, selected sailing path, and alternate
+paths visually distinct.
+
+All route results produced by the older three-corridor engine are intentionally
+made stale by the new routing-engine fingerprint and are suppressed from the map
+until recalculated.
 
 This repository contains no installation-specific share name, tracking URL,
 coordinates, messages, IMEI, destination, provider credential, or archive
 database. Test fixtures are synthetic; installation-specific values remain
 inside Home Assistant.
 
-See [RELEASE_DECISIONS.md](RELEASE_DECISIONS.md) for the explicit storage,
-architecture, provider, passage, routing, privacy, and UX decisions that define
-this release and should accompany future change requests.
+See [RELEASE_DECISIONS.md](RELEASE_DECISIONS.md) for the explicit decisions that
+define this release.
 
-## Read this first
+## Safety boundary
 
-- A recommended application-class or high-endurance microSD card is supported.
-  An SSD is an optional resilience upgrade, not a v2.1.1 prerequisite.
-- BlueSky Passage is supplementary. It is not a navigation, weather-routing,
-  collision-avoidance, charting, or emergency system.
-- The generated path is a **comparison estimate**, never a safe or navigable
-  route. It does not avoid land, charted hazards, traffic, restricted areas,
-  weather warnings, or local notices.
-- Xweather is optional. Without credentials, route creation produces only an
-  explicitly labeled great-circle reference.
+BlueSky Passage is a planning/analysis aid only. It is **not** a chart plotter,
+navigation system, weather-routing authority, collision-avoidance system, or
+emergency system. Garmin/inReach and the appropriate emergency-response channel
+remain authoritative for SOS functions.
+
+The v2.2 routing engine enforces a coarse dry-land constraint and sailing no-go
+constraint because a route that crosses modeled land or assumes an impossible
+upwind heading is not useful even as a comparison. That does **not** make the
+result navigable. The bundled land mask is not a nautical chart and does not
+know depths, reefs, rocks, bridge clearances, channels, restricted areas,
+traffic, COLREGS, weather warnings, local notices, or skipper judgment. Verify
+any real voyage with appropriate charts, forecasts, routing/navigation tools,
+and seamanship.
+
+If Xweather is unavailable, or a sailing vessel lacks a usable wind vector for
+the requested period, BlueSky Passage saves only an explicitly labeled
+**water-valid geometric reference**. It does not manufacture a weather-optimized
+sailing path.
 
 ## Requirements
 
 - Home Assistant Core 2026.7.4 or newer
 - HACS 2.x for the recommended installation path
 - A public Garmin MapShare share name/URL, or its MapShare password if private
-- Internet access for Garmin and online map tiles
+- Internet access for Garmin and online OpenStreetMap tiles
 - Administrator access for setup and data-changing actions
-- Optional Xweather Weather API client ID and secret for modeled wind, waves,
-  and currents
+- Optional Xweather Weather API client ID and secret with the required endpoint access
 - Optional PredictWind public tracking URL for the on-demand PredictWind view
 
-No YAML or separate add-on is required. The archive, weather adapter, route
-comparison engine, panel, and authenticated API are one custom integration.
+No YAML, external database server, or companion add-on is required. The archive,
+weather adapter, sailing-analysis engine, panel, and authenticated API ship as
+one custom integration.
 
 ## Install or upgrade with HACS
 
 1. Create a full Home Assistant backup.
-2. In **HACS**, open the upper-right menu and select **Custom repositories**.
-3. Add `https://github.com/psuslick/bluesky-passage` as an **Integration**.
-4. Open **BlueSky Passage**, select **Download**, and choose version 2.1.1.
-5. Restart Home Assistant; a browser reload alone is not sufficient.
+2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
+   **Integration** if it is not already installed.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.2.0**.
+4. Restart Home Assistant; a browser reload alone is not sufficient.
+5. Hard-refresh the browser or reset the Companion App frontend cache if the old
+   panel remains visible.
+6. Open BlueSky Passage and verify archive count, earliest/latest timestamps,
+   archive integrity, Garmin availability, and provider status.
+7. Recalculate any passage route. Pre-2.2 route comparisons are intentionally
+   stale and should not be relied on.
 
-For a fresh installation:
+For a fresh installation, open **Settings → Devices & services → Add
+integration**, select **BlueSky Passage**, enter the Garmin MapShare share name
+or public URL, enter only the MapShare password if the share is protected, and
+optionally enter the PredictWind public tracking URL.
 
-1. Open **Settings → Devices & services → Add integration**.
-2. Search for **BlueSky Passage**.
-3. Enter the MapShare share name or public URL.
-4. Enter only the MapShare password if that share is protected. Do not enter a
-   Garmin account password.
-5. Optionally enter the public PredictWind tracking URL.
-6. Submit, then open **BlueSky Passage** in the Home Assistant sidebar.
-
-For an existing v2.0.0/v2.0.1 installation:
-
-1. Do **not** delete the existing config entry.
-2. Do **not** delete or move the existing archive.
-3. After restart, open the panel and compare archive count, earliest/latest
-   timestamp, size, and integrity with the pre-upgrade values.
-4. Open **Settings → Devices & services → BlueSky Passage → Configure**.
-5. Add optional Xweather and PredictWind values; leaving the Xweather secret
-   blank preserves an existing saved secret.
-6. Test the notification from **Data & settings**.
+For an existing installation, do **not** delete the existing config entry and do
+**not** delete or move the archive. Provider options are configured at
+**Settings → Devices & services → BlueSky Passage → Configure**. Leaving a saved
+Xweather secret blank preserves the existing secret.
 
 HACS manages only:
 
@@ -81,319 +105,306 @@ HACS manages only:
 /config/custom_components/bluesky_passage/
 ```
 
-Home Assistant OS exposes `/config` as `/homeassistant` in File editor, so the
-same integration may appear there as:
-
-```text
-/homeassistant/custom_components/bluesky_passage/
-```
-
-The durable archive remains outside the HACS-managed component folder:
+The durable archive remains outside that directory:
 
 ```text
 /config/bluesky_passage/archive.sqlite3
 ```
 
-Normal HACS upgrades therefore replace code but do not replace the archive.
-The integration domain, config-entry unique ID, entity unique IDs, and archive
-path are unchanged from v2.0.x.
+A normal HACS update therefore replaces integration code and bundled static data
+without replacing the voyage archive. The integration domain, config-entry
+unique ID, entity unique IDs, archive path, and SQLite schema remain compatible
+with v2.1.x.
 
 ## Dashboard structure
 
-The Home Assistant sidebar continues to navigate between Home Assistant areas.
-BlueSky Passage subnavigation is a proper top tab bar inside its panel:
+BlueSky Passage keeps Home Assistant's global sidebar intact and uses four top
+tabs inside its own panel:
 
-1. **Overview** — safety/source alerts, four current metrics, latest 24-hour
-   track, exact selected-record detail, and latest inReach text.
+1. **Overview** — source/safety state, four current metrics, latest 24-hour
+   track, selected-record details, and latest exact inReach text.
 2. **History & charts** — 24 hours by default; year/all/custom/passage ranges;
-   local, modeled-weather, and on-demand PredictWind map views; explicit
-   two-report selection; linked analytics and exports.
-3. **Passages** — create, view, edit, backdate, open-end, close, or delete a
-   passage annotation at any time; preview report coverage before saving; add
-   or revise a destination; create a comparison path.
+   linked Garmin map and analytics; on-demand Xweather model data; optional
+   PredictWind view.
+3. **Passages** — create/edit/backdate/open-end/close passage annotations,
+   preview archive coverage, manage destinations, edit vessel performance, and
+   calculate sailing-analysis routes.
 4. **Data & settings** — archive health, Garmin historical backfill, provider
-   status, legacy Recorder recovery, vessel profile, manual imports,
-   notification test, and integration configuration link.
+   status, Recorder recovery, manual imports, notification testing, and the
+   integration configuration link.
 
 All authenticated Home Assistant users can view the panel. Only administrators
-can poll manually, change metadata, contact Xweather, backfill, import,
-rollback, calculate paths, export, or test notifications.
+can poll manually, contact Xweather, alter passage/profile data, backfill,
+import, rollback, export, calculate routes, or test notifications.
+
+## Map behavior
+
+The built-in map supports mouse, pen, and touch interaction without an external
+map-card dependency. Drag on the map to pan, use `+`/`-` to zoom, use the arrow
+buttons as a non-drag panning alternative, and use the fit control to restore a
+view around the selected data. A drag suppresses accidental report-point clicks.
+Map center and zoom are maintained per map during ordinary redraws; changing the
+selected range/source intentionally refits the relevant data.
+
+Route layers are deliberately distinct:
+
+- archived Garmin track: observed vessel movement;
+- selected sailing-analysis path: solid green;
+- alternative sailing candidates: faint dashed green;
+- shortest-water geometric reference: amber dashed;
+- direct geodesic reference: gray dotted when water-valid, red dotted when it
+  intersects modeled land.
+
+The direct geodesic remains visible for context even when rejected. It is never
+a scored v2.2 sailing candidate.
+
+The raster basemap comes from OpenStreetMap. Local archive overlays remain
+available even if online basemap tiles cannot load.
 
 ## Storage and write behavior
 
-The existing recommended-class microSD is adequate because v2.1.1 deliberately
-keeps background work small:
+A healthy application-class/high-endurance microSD with adequate free space can
+run every v2.2 feature. An SSD/NVMe remains a useful whole-system resilience
+upgrade but is not required for BlueSky Passage.
 
-- Garmin is polled every 10 minutes with a rolling 48-hour overlap.
-- Stable source-scoped keys prevent repeat feed rows from becoming repeat
-  archive rows.
-- SQLite uses WAL mode, `synchronous=NORMAL`, a 1,000-page auto-checkpoint, and
-  an 8 MiB journal-size limit.
-- Historical retrieval runs in user-started, resumable seven-day chunks.
-- Xweather and path calculations run only when requested; model results are
-  cached and reused.
-- Chart responses are bounded and retain endpoints and local SOG extrema.
-- Home Assistant Recorder does not store the permanent source archive and does
-  not control its retention.
+Garmin is normally polled every ten minutes with a rolling 48-hour overlap.
+Stable source-scoped keys deduplicate before insert. SQLite uses WAL mode,
+`synchronous=NORMAL`, bounded checkpoints, and an 8 MiB journal-size limit.
+Historical retrieval is administrator-started and chunked. Weather and routing
+run only on request and normalized provider results are cached. Chart payloads
+are bounded and shape-preserving.
 
-An SSD becomes worthwhile for broader Home Assistant resilience, especially
-with many high-frequency integrations, a large Recorder database, frequent
-backups, or years of additional write-heavy workloads. It is not required to
-turn on any BlueSky Passage feature.
+The bundled 1.25-arc-minute comparison land mask is about 0.4 MiB compressed.
+Its roughly 18.7 MiB bitset is decompressed lazily in memory when routing first
+needs it; it does not create ongoing disk writes.
 
-Use full Home Assistant backups. Do not copy only `archive.sqlite3` while Home
-Assistant is running: the active `-wal` and `-shm` companions may contain part
-of the consistent state.
+Use full Home Assistant backups. Do not copy only the live `archive.sqlite3`
+file while Home Assistant is running because its WAL/SHM companions may contain
+part of the consistent state.
 
 ## Garmin archive and historical backfill
 
-Normal collection asks Garmin for the last 48 hours and stores only unseen
-records. The overlap tolerates delayed publication and brief outages without
-creating duplicates.
+Normal collection requests a rolling 48-hour Garmin interval and stores only
+unseen records. To populate older history, open **Data & settings → Garmin
+historical backfill**, select a start/end range, and preview before import. The
+selected dates persist across panel redraws and the active job card shows the
+exact submitted range and chunk count. A second preview cannot be launched
+while a job is pending/running.
 
-To populate older records:
+Backfill runs in seven-day chunks and can resume after interruption. A valid KML
+response containing no timestamped records for an older requested interval is
+now treated as a successful empty chunk rather than an unusable feed. Malformed
+XML, non-KML content, authentication problems, and genuinely unusable responses
+still fail closed. This distinction prevents a legitimate gap in Garmin history
+from aborting an otherwise recoverable multi-week or multi-year scan.
 
-1. Open **Data & settings → Garmin historical backfill**.
-2. Choose start and end dates.
-3. Select **Preview Garmin availability**.
-4. Leave the page open while seven-day chunks run. If the browser or Home
-   Assistant disconnects, use **Resume failed chunk** later.
-5. Review returned and duplicate counts plus first/last timestamps.
-6. Select **Import previewed range** only after the preview is acceptable.
-
-The commit is one provenance-tracked import batch. Rollback removes only rows
-inserted by that batch. It does not remove normal Garmin rows, passages, or
-weather data. Garmin controls what history its feed exposes; requesting a date
-range cannot manufacture unavailable records.
-
-Existing v2.0.x BlueSky Passage archive rows are already in the same database
-and need no migration import. Manual JSON/GeoJSON/GPX import is a fallback for
-records Garmin cannot supply.
+After preview, review returned/new/duplicate counts and first/last timestamps.
+**Import previewed range** commits only the previewed new rows as one
+provenance-tracked, rollbackable batch. Rollback removes only rows inserted by
+that batch; normal Garmin rows, passages, and weather data remain untouched.
+Garmin controls what history its public feed exposes; a requested date range
+cannot recreate data Garmin no longer publishes.
 
 ### Recovering compatible v1 Recorder history
 
-Use this only after a Garmin preview fails to return v1 points that are still
-visible in **History**. It is intentionally a fallback because Home Assistant
-Recorder normally has much shorter retention and reconstructing several entity
-histories is less authoritative than importing original Garmin records.
-
-1. Keep the v1 Garmin MapShare entities enabled until recovery is verified.
-2. Open **Data & settings → Legacy Home Assistant Recorder recovery**.
-3. Choose a range of at most 31 days. Ten days is the recommended first pass.
-4. Confirm the automatically suggested legacy position, report-time, velocity,
-   course, elevation, GPS, emergency, and text entities. Only position is
-   required.
-5. Select **Preview Recorder recovery**.
-6. Review reconstructed, new, duplicate, rejected, first, and last values.
-7. Select **Import previewed Recorder rows** only if the preview is credible.
-8. Inspect the recovered map and point details before disabling v1.
-
-The browser reads history through Home Assistant's authenticated
-`history/history_during_period` WebSocket command. The integration does not
-open or modify Home Assistant's database. The resulting `ha_recorder` batch is
-stored in the dedicated archive and can be rolled back from the import table.
-Identical values are matched to a position only when their history state is
-temporally applicable; unavailable optional fields stay null. This remains a
-best-effort reconstruction, so Garmin backfill is preferred.
+Use the Recorder fallback only when Garmin cannot reproduce older points that
+are still available in Home Assistant History. The panel performs a bounded,
+non-mutating preview first, dynamically suggests compatible legacy entities,
+and stores an approved result as a source-labelled, rollbackable
+`ha_recorder` batch. It remains best-effort reconstruction; original Garmin
+records are preferred.
 
 ## Passage model
 
-A passage is metadata over a time range, not a recording switch:
+A passage is metadata over a time range, not a tracking switch. Garmin archiving
+continues whether zero, one, or many passages exist. Passages may be created
+before, during, or after travel; may be open-ended or fixed; may overlap; and
+may be edited or deleted without changing raw source records.
 
-- Global Garmin archiving continues whether zero, one, or many passages exist.
-- An open-ended passage means “from this start time onward.” It does not mean
-  active, underway, started in real time, or subject to automatic completion.
-- A passage can be created after departure, edited after arrival, or deleted
-  without changing raw report rows.
-- Overlapping passages are allowed and shown during preview.
-- Saving requires the exact preview token, so changing a time or destination
-  forces coverage to be reviewed again.
-- Destination changes create destination versions; historical raw reports are
-  never copied into a passage.
-- Clearing every destination field is an explicit previewed removal: the
-  coverage card states how many saved destination versions will be removed,
-  and the exact clear decision is locked into the preview token.
+Saving requires the exact preview token. Changing a boundary or destination
+after preview forces coverage to be reviewed again. Destination changes create
+versioned destination records rather than rewriting history. Clearing a
+destination is an explicit previewed operation.
 
-## Analytics and map selection
+## Analytics and modeled weather
 
-History defaults to the last 24 hours. The analytics graph uses one shared time
-axis for:
+History defaults to the last 24 hours. The primary analytics graph shares one
+time axis for observed Garmin SOG and optional modeled Xweather wind/gust/wave
+series. Missing provider values remain gaps rather than zeros. A two-report map
+range selection can reload the map and graph to the same inclusive interval.
+Selecting a map point or chart point focuses the exact archived record; current
+message text is never copied onto an older point.
 
-- vessel SOG from Garmin — **observed**
-- wind and optional gust from Xweather — **modeled**
-- significant wave height from Xweather — **modeled**
-
-Missing provider values remain gaps rather than zeros. Selecting **Select map
-range** and then two report dots reloads the map and graph for that inclusive
-time span. Clicking a dot in the map or speed series selects the exact source
-record and never copies current text onto an older point.
-
-The PredictWind frame is created only while that map view is selected. If the
-provider prevents embedding, use **Open PredictWind map**. This integration
-does not modify the PredictWind account or its route/history data.
+The PredictWind frame is loaded only while that view is selected. If PredictWind
+blocks embedding, use the direct-link action. BlueSky Passage does not modify a
+PredictWind account or write routes/history to it.
 
 ## Optional Xweather configuration
 
 1. Obtain a Weather API client ID and client secret whose subscription permits
-   the Conditions and Maritime endpoints.
+   the required Conditions and Maritime endpoints.
 2. Open **Settings → Devices & services → BlueSky Passage → Configure**.
 3. Enter both Xweather values and save.
-4. In **History & charts**, choose **Weather model**, then select **Fetch /
-   refresh model data**.
+4. In **History & charts**, choose **Weather model** and select **Fetch / refresh
+   model data** to test modeled track analytics.
+5. In **Passages**, recalculate a route to use the v2.2 sailing search.
 
 Credentials remain in the Home Assistant config entry and are sent only from
-the backend to Xweather. They are not sent to the panel, stored in the archive,
-included in diagnostics, or written into route summaries.
+the backend to Xweather. They are not sent to panel JavaScript, stored in the
+voyage archive, included in diagnostics, or written into route summaries.
 
-The integration requests at most 12 representative positions per operation,
-with two concurrent position requests. Conditions and Maritime are evaluated
-independently so wind may remain available when marine fields are not. Marine
-history before 2024 is unavailable from Xweather's Maritime Archive and is
-shown as a gap/warning rather than zero. A model period more than six hours
-from the requested report time is rejected, and a transient unavailable result
-expires from the request cache after one hour.
+Track analytics remain capped at 12 representative positions per operation.
+The v2.2 route planner uses a separate bounded lattice of at most **11**
+time/location positions around the shortest-water corridor, with two concurrent
+position requests and the existing normalized cache. Conditions and Maritime
+are evaluated independently so marine fields may remain available when wind is
+not, and vice versa. For a sailing vessel, however, a usable wind vector is
+required before the result can be called a sailing-weather search; otherwise
+only the water-valid reference is saved.
 
-## Vessel profile and path creator
+Modeled values more than six hours from the requested sample time are rejected.
+Transient unavailable results expire from the request cache after one hour.
+Older Maritime Archive availability is provider-limited and missing historical
+marine fields remain explicit gaps.
 
-The vessel profile accepts whatever is known:
+## Vessel profile and v2.2 sailing route analysis
 
-- hull configuration
-- length overall and waterline length
-- beam and draft
-- displacement and sail area
-- engine or observed cruise speed
-- maximum comfortable wave height
-- optional polar-table rows (`twa_deg`, `tws_kn`, `boat_speed_kn`)
+The vessel profile accepts whatever is known: hull configuration, dimensions,
+displacement, sail area, engine/observed cruise speed, maximum comfortable wave
+height, minimum upwind true-wind angle, and optional polar rows containing
+`twa_deg`, `tws_kn`, and `boat_speed_kn`.
 
-No field is mandatory. Speed estimation falls back in this order: polar table,
-observed cruise speed, engine cruise speed, hull-speed estimate, then a generic
-5.5 kn comparison value. Saving a profile can recalculate the selected
-passage's latest comparison.
+For sailing vessels the minimum upwind TWA defaults to **40°** when not supplied.
+The allowed profile value is clamped to a conservative 25–70° range. A heading
+inside the no-go angle is invalid; the optimizer must tack/change heading rather
+than move straight at a reduced speed. Motor-only hull configurations do not use
+a sailing no-go angle.
 
-For a passage with departure and destination, the path creator evaluates three
-simple geodesic corridors: direct, port-offset, and starboard-offset. Each uses
-four representative time/location samples. Where available, modeled wind,
-waves, and currents modify estimated speed and a comfort-oriented risk score.
-The best-scoring estimate is saved as a version alongside all candidate
-summaries. Without usable weather, the direct line is saved as a
-`great_circle_reference` and no optimization is claimed.
+Performance is resolved in this order: supplied polar interpolation when
+available, otherwise the observed/engine/hull/generic speed baseline combined
+with a conservative sail-angle/wind fallback. Xweather waves can reduce speed
+and add risk/comfort penalties. Current speed/direction is added as a vector to
+through-water vessel velocity, producing a modeled course and speed over ground.
 
-Every saved comparison includes a context fingerprint. Changing the passage
-range, departure coordinates, destination version, or vessel profile marks the
-older comparison stale and removes its map overlay until an administrator
-recalculates it; the prior summary remains visible for audit.
+### Route-generation sequence
 
-This intentionally lean implementation does **not** contain electronic charts,
-land masks, routing constraints, forecast ensembles, tack/gybe strategy,
-weather warnings, traffic, COLREGS, or hazard avoidance. Never transfer its
-coordinates to navigation equipment as an approved course.
+The route planner first checks whether departure and destination are water
+points in the comparison mask. It builds a coarse shortest-water reference with
+an adaptive A* search when the direct segment intersects land, then revalidates
+every simplified segment against the higher-resolution mask. It samples a small
+spatiotemporal Xweather field around that water corridor. The sailing search
+then advances a beam of materially different candidate states over time,
+examining destination-oriented headings, alternative offsets, prior heading,
+and close-hauled headings. Land crossings and no-go headings are discarded
+before scoring. Current modifies COG/SOG; wind, waves, vessel performance,
+travel time, comfort risk, and major maneuvers influence candidate score.
+
+The engine stores the best complete result and up to two materially different
+alternatives. The direct great-circle line and shortest-water line are references
+only. If the weather search cannot close a valid route, it saves the water-valid
+reference with an explicit warning instead of inventing an optimized route.
+
+This remains a deliberately bounded analytical search, not a commercial
+navigation-grade isochrone router. The weather field is sparse/interpolated and
+the land mask is coarse. Treat the result as a way to compare plausible sailing
+behavior against observed Garmin history—not as coordinates to transfer to a
+navigation device.
 
 ## Notifications
 
 Persistent Home Assistant notifications are enabled by default. An exact
-Companion App `notify.mobile_app_...` action can be added under Configure after
-testing it independently in Developer tools.
-
-| Condition | Passage required | Behavior |
-|---|---:|---|
-| Emergency becomes active or clears | No | Always processed |
-| Latest report exceeds stale threshold | No | One alert plus recovery |
-| Explicit invalid GPS fix persists 10 minutes | No | One alert plus recovery |
-| New inReach text appears | No | Includes the exact event text |
-| Three Garmin polls fail | No | Source alert plus recovery |
-| Home Assistant zone changes | No | Optional; disabled by default |
-
-There is no passage-arrival notification or automatic passage transition in
-v2.1.1 because passages are editable historical annotations.
+Companion App `notify.mobile_app_...` action can be added through Configure after
+it has been tested independently in Developer Tools. Emergency transitions,
+stale tracking, persistent invalid GPS, new inReach text, Garmin source failure
+and recovery, and optional HA-zone changes operate from the continuous latest
+Garmin record and do not depend on a passage being active.
 
 ## Privacy model
 
-Stored locally:
+Stored locally include normalized/raw Garmin/import rows, positions/timestamps,
+messages/events, passage and destination versions, sailing-analysis summaries,
+vessel profile, import/backfill provenance, normalized cached weather samples,
+and provider option values held by Home Assistant's config-entry storage.
 
-- normalized and raw Garmin/import records
-- positions, timestamps, messages, event text, and feed-supplied device IDs
-- passage/destination versions and route comparison summaries
-- vessel profile, import provenance, backfill progress, and cached normalized
-  weather samples
-- selected legacy entity identity inside any administrator-approved Recorder
-  recovery batch
-- provider values held by Home Assistant's config-entry storage
-
-Network-visible only when relevant:
-
-- Garmin receives normal/backfill feed requests.
-- OpenStreetMap receives tile requests for displayed map areas.
-- PredictWind receives a browser request only when its map/link is opened.
-- Xweather receives coordinate/time samples only during an explicit weather or
-  comparison request.
-
-The authenticated panel receives normalized provider values but never the
-Xweather secret or upstream response envelope. Diagnostics redact coordinates,
-messages, URLs, passwords, mobile action names, and Xweather credential values.
+Network access occurs only when relevant: Garmin for feed/backfill requests,
+OpenStreetMap for displayed basemap tiles, PredictWind only when its view/link is
+opened, and Xweather only during an administrator-requested weather or sailing
+analysis operation. The authenticated panel receives normalized provider values
+but never the Xweather secret or raw upstream response envelope. Diagnostics
+redact coordinates, messages, URLs, passwords, mobile action names, and Xweather
+credential values.
 
 ## Troubleshooting
 
 ### Integration absent after download
 
-Confirm this file exists and restart Home Assistant:
+Confirm `/config/custom_components/bluesky_passage/manifest.json` exists,
+restart Home Assistant, hard-refresh the browser, and inspect **Settings →
+System → Logs** for `bluesky_passage`.
 
-```text
-/config/custom_components/bluesky_passage/manifest.json
-```
+### Integration cog loops back to BlueSky Passage
 
-Then hard-reload the browser and inspect Home Assistant logs for
-`bluesky_passage`.
+That was a v2.1.0 panel-registration bug. Version 2.1.1+ no longer registers the
+sidebar as the integration configuration panel. Confirm the installed version,
+restart Home Assistant, and clear the frontend cache.
 
 ### Archive count does not increase
 
-A successful overlapping poll creates no row unless Garmin exposes an unseen
-record. Check source availability, last successful poll, and the bounded Garmin
-request diagnostics rather than repeatedly selecting Refresh.
+A successful overlapping poll creates no row unless Garmin publishes an unseen
+record. Check source availability and last successful poll rather than repeatedly
+pressing Refresh.
+
+### Backfill stops on an old interval
+
+In v2.2, valid empty KML intervals continue as zero-record chunks. If a job still
+fails, the response was malformed/non-KML, authentication/network access failed,
+or Garmin returned a structure the parser cannot safely interpret. Preserve the
+failed interval and sanitized error before changing parser behavior.
 
 ### All-time shows only one point
 
-The archive currently contains one matching source row; the panel no longer
-labels a default seven-day query as all time. Run a Garmin backfill preview and
-verify Garmin actually returns older timestamps.
+The local archive contains only one matching source row. Run a Garmin backfill
+preview and verify Garmin actually exposes older records.
+
+### Map will not pan
+
+Version 2.2 adds pointer/touch drag panning and arrow-button panning. If the map
+still behaves like the old version after upgrade, hard-refresh the browser or
+reset the Companion App frontend cache and confirm the footer reports 2.2.0.
 
 ### Basemap blank but overlays appear
 
 The browser cannot reach `tile.openstreetmap.org` or a filter blocks it. Local
-archive data is unaffected.
-
-### PredictWind frame blank
-
-The link is absent, the browser blocks mixed/third-party content, or PredictWind
-disallows embedding. Open the public link directly from the view.
+archive and route overlays are unaffected.
 
 ### Xweather returns partial data
 
-Wind and marine endpoints are independent. Subscription access, model coverage,
-the Maritime ±forecast window, or Maritime Archive's 2024 start can leave some
-fields missing. The dashboard keeps those fields null and displays warnings.
+Conditions and Maritime are independent. Subscription access, temporal model
+coverage, Maritime forecast/archive windows, or provider gaps can leave some
+fields null. BlueSky Passage keeps missing values null and shows warnings. A
+sailing-weather route specifically requires a usable wind vector; marine-only
+data cannot satisfy the no-go constraint.
 
-### Backfill interrupted
+### Sailing search returns only a water-valid reference
 
-Return to **Data & settings** and select **Resume failed chunk**. Completed
-chunks are not repeated as new rows because deduplication is source-stable.
+Check Xweather provider warnings, vessel profile, departure/destination water
+positions, and whether usable wind data exists for the requested period. The
+optimizer intentionally fails closed rather than scoring a land-crossing or
+no-go route.
 
 ## Future-change handoff
 
-For a future maintainer or AI-assisted change, provide:
+For future changes provide the current README and CHANGELOG, installed Home
+Assistant and BlueSky Passage versions, redacted diagnostics, archive
+count/earliest/latest/integrity, whether Xweather is configured (not the secret),
+and the exact failing panel action or desired behavior.
 
-1. this README and `CHANGELOG.md`;
-2. installed Home Assistant and BlueSky Passage versions;
-3. redacted integration diagnostics;
-4. the failing panel section and exact action sequence;
-5. archive count/earliest/latest/integrity, never the private database unless
-   intentionally sharing all positions/messages;
-6. whether Xweather is configured (not the values);
-7. whether storage is microSD or SSD.
-
-Preserve these invariants: domain `bluesky_passage`, existing config entry and
-entity unique IDs, archive path, raw-record immutability, source labels,
-preview-before-passage-save, admin-only mutations, provider-secret isolation,
-and explicit non-navigation labeling.
+Preserve these invariants unless deliberately redesigning them: domain
+`bluesky_passage`; existing config entry/entity unique IDs; archive path; raw
+record immutability; source labels; preview-before-passage-save; admin-only
+mutations; provider-secret isolation; the v2.2 hard rule that direct geodesic is
+reference-only; land/no-go rejection before route scoring; and explicit
+non-navigation labeling.
 
 ## Development validation
 
@@ -403,18 +414,28 @@ From the repository root:
 python3 tools/validate_bundle.py
 ```
 
-The release gate compiles the integration and tools, checks JSON/manifest/HACS
-structure, validates frontend-to-backend command coverage and JavaScript
-syntax, scans public text for installation-specific tracking values, and runs
-32 standard-library regression tests including v2 archive migration, delayed
-Garmin rows, malformed KML, resumable backfill, Recorder preview, and rollback.
+The release gate compiles Python, checks JSON/manifest/HACS structure, validates
+frontend-to-backend command coverage and JavaScript syntax, scans public text for
+installation-specific secrets/URLs, verifies the bundled land-mask/notices and
+v2.2 routing/map/backfill regression markers, and runs **37** standard-library
+regression tests. The suite includes archive migration/deduplication, Garmin
+bounded history and valid-empty historical KML, passage preview/editing,
+rollback, weather gap handling, Hampton-to-Beaufort land rejection, no-go
+rejection, synthetic upwind tacking, missing-wind fail-closed behavior, and
+frontend configuration/backfill safeguards.
 
-The workflow also runs Hassfest and HACS validation. The local suite covers
-parsing/units, date-bounded Garmin requests, deduplication, passage preview and
-editing, backfill chunking, import rollback, null weather values, route
-fallback behavior, exports, schema integrity, and frontend syntax/command
-alignment.
+The CI workflow also runs Hassfest and HACS validation.
+
+## Third-party land-mask data
+
+`custom_components/bluesky_passage/data/landmask_1_25min.bit.gz` is a derived,
+bit-packed dry-land mask generated from the `basemap-data` 2.0.0 GSHHG-derived
+land/sea mask. Licensing/attribution files are included as
+`THIRD_PARTY_NOTICES.md`, `COPYING.LGPL-DATA`, and `COPYING.LESSER-DATA`.
+The mask is included only to reject obviously impossible land-crossing
+comparison segments; it is not a nautical chart.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+BlueSky Passage code is MIT licensed. See `LICENSE`. Third-party data included
+for the land mask is covered separately as described above.

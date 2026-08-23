@@ -39,6 +39,9 @@ def route_context_hash(
         "departure_longitude": passage.get("departure_longitude"),
         "destination_version_id": passage.get("current_destination_version_id"),
         "profile_updated_at_utc": profile_updated_at_utc,
+        # Routing semantics are part of the saved context. This intentionally
+        # marks every pre-2.2 three-corridor result stale after upgrade.
+        "routing_engine": "isochrone-water-v1",
     }
     return hashlib.sha256(
         json.dumps(context, sort_keys=True, separators=(",", ":")).encode()
@@ -853,7 +856,7 @@ class SQLiteArchive:
             elif stored_hash != expected_hash:
                 passage["route"]["context_status"] = "stale"
                 passage["route"]["context_warning"] = (
-                    "The passage, destination, or vessel profile changed after this "
+                    "The passage, destination, vessel profile, or routing engine changed after this "
                     "comparison was saved. Recalculate it to restore the map overlay."
                 )
             else:

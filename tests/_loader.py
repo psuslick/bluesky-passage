@@ -36,6 +36,7 @@ database = load("database")
 exporting = load("exporting")
 migration = load("migration")
 garmin_dates = load("garmin_dates")
+land = load("land")
 routing = load("routing")
 
 # weather.py is mostly pure normalization logic but imports two Home Assistant

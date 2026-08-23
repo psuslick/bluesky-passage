@@ -131,6 +131,10 @@ def main() -> int:
         ROOT / ".github" / "workflows" / "validate.yml",
         COMPONENT / "brand" / "icon.svg",
         COMPONENT / "brand" / "icon.png",
+        COMPONENT / "data" / "landmask_1_25min.bit.gz",
+        ROOT / "THIRD_PARTY_NOTICES.md",
+        ROOT / "COPYING.LGPL-DATA",
+        ROOT / "COPYING.LESSER-DATA",
     ):
         if not required.is_file():
             errors.append(
@@ -192,6 +196,46 @@ def main() -> int:
             errors.append(
                 f"Backfill UI persistence/range marker missing: {required_frontend_marker}"
             )
+    for required_frontend_marker in (
+        "_startMapDrag",
+        "_moveMapDrag",
+        "_endMapDrag",
+        "_panMap",
+        'addEventListener("pointerdown"',
+        "Rejected · crosses modeled land",
+        "Shortest water reference",
+        "Minimum upwind TWA / no-go (deg)",
+    ):
+        if required_frontend_marker not in frontend_text:
+            errors.append(
+                f"v2.2 map/routing UI marker missing: {required_frontend_marker}"
+            )
+
+    routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
+    for marker in (
+        'ROUTING_ENGINE_VERSION = "isochrone-water-v1"',
+        "segment_is_water",
+        "minimum_upwind_twa_deg",
+        '"scored_candidate": False',
+        '"method": "xweather_sailing_search"',
+        "_final_leg_performance",
+    ):
+        if marker not in routing_text:
+            errors.append(f"v2.2 routing validity marker missing: {marker}")
+
+    parser_text = (COMPONENT / "parser.py").read_text(encoding="utf-8")
+    feed_text = (COMPONENT / "feed.py").read_text(encoding="utf-8")
+    if "allow_empty: bool = False" not in parser_text or "allow_empty=bool(params)" not in feed_text:
+        errors.append("Bounded Garmin empty-KML handling regression guard is missing")
+
+    database_text = (COMPONENT / "database.py").read_text(encoding="utf-8")
+    if '"routing_engine": "isochrone-water-v1"' not in database_text:
+        errors.append("Route context does not invalidate pre-v2.2 routing semantics")
+
+    land_text = (COMPONENT / "land.py").read_text(encoding="utf-8")
+    for marker in ("landmask_1_25min.bit.gz", "segment_is_water", "path_is_water"):
+        if marker not in land_text:
+            errors.append(f"Land-mask implementation marker missing: {marker}")
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))
     server_commands = set(re.findall(r'f"\{DOMAIN\}/([a-z_]+)"', backend_text))

@@ -14,6 +14,7 @@ from _loader import (
     database,
     exporting,
     garmin_dates,
+    land,
     migration,
     parser,
     routing,
@@ -93,6 +94,11 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(parser.KmlParseError):
             parser.parse_kml("<kml><Document /></kml>")
 
+    def test_bounded_history_can_accept_valid_empty_kml(self):
+        self.assertEqual([], parser.parse_kml("<kml><Document /></kml>", allow_empty=True))
+        with self.assertRaises(parser.KmlParseError):
+            parser.parse_kml("<html><body /></html>", allow_empty=True)
+
     def test_predictwind_shape_normalizes(self):
         records = parser.records_from_mappings(
             [{"t": 1787256000, "p": [18.1, -61.2], "bsp": 6.2, "bearing": 275}]
@@ -155,14 +161,90 @@ class GarminDateTests(unittest.TestCase):
 
 
 class RoutingTests(unittest.TestCase):
-    def test_no_weather_is_explicit_great_circle_reference(self):
+    def test_no_weather_is_explicit_water_valid_reference(self):
         profile = routing.VesselProfile.from_mapping({})
-        routes = routing.candidate_routes((18.0, -62.0), (17.1, -61.8))
+        routes = routing.candidate_routes((18.0, -62.0), (17.2, -62.0))
         result = routing.score_routes(routes, profile, {}, "2026-08-20T20:00:00Z")
-        self.assertEqual("great_circle_reference", result["method"])
+        self.assertEqual("water_valid_reference", result["method"])
         self.assertFalse(result["weather_used"])
-        self.assertEqual("direct", result["selected"]["key"])
-        self.assertIn("not a navigable route", result["disclaimer"])
+        self.assertEqual("water_reference", result["selected"]["key"])
+        self.assertTrue(result["selected"]["land_valid"])
+        self.assertFalse(result["reference"]["scored_candidate"])
+        self.assertIn("not a nautical chart", result["disclaimer"])
+
+    def test_direct_hampton_to_beaufort_is_rejected_and_water_path_detours(self):
+        start = (36.99, -76.30)
+        destination = (34.68, -76.68)
+        self.assertFalse(land.segment_is_water(start, destination))
+        path = routing.shortest_water_path(start, destination)
+        self.assertTrue(land.path_is_water(path))
+        self.assertGreater(routing.path_distance(path), calculations.haversine_nm(*start, *destination) + 20)
+
+    def test_no_go_heading_is_not_assigned_a_slow_straight_speed(self):
+        profile = routing.VesselProfile.from_mapping({
+            "hull_configuration": "monohull sailboat",
+            "observed_cruise_speed_kn": 6.0,
+            "minimum_upwind_twa_deg": 40,
+        })
+        weather_value = {"wind_speed_kn": 14.0, "wind_dir_deg": 180.0}
+        self.assertIsNone(routing.performance_on_heading(profile, 180.0, weather_value))
+        self.assertIsNotNone(routing.performance_on_heading(profile, 135.0, weather_value))
+
+    def test_sailing_search_requires_a_wind_vector(self):
+        start = (18.0, -62.0)
+        destination = (17.2, -62.0)
+        profile = routing.VesselProfile.from_mapping({
+            "hull_configuration": "monohull sailboat",
+            "observed_cruise_speed_kn": 6.0,
+        })
+        baseline = routing.shortest_water_path(start, destination)
+        requests = routing.route_weather_sample_requests(
+            baseline, "2026-08-20T20:00:00Z", profile
+        )
+        marine_only = [{
+            **item,
+            "conditions_available": False,
+            "maritime_available": True,
+            "wave_height_m": 0.7,
+            "current_speed_kn": 0.5,
+            "current_dir_deg": 180.0,
+        } for item in requests]
+        result = routing.optimize_sailing_route(
+            start, destination, "2026-08-20T20:00:00Z", profile, baseline, marine_only
+        )
+        self.assertEqual("water_valid_reference", result["method"])
+        self.assertTrue(result["warnings"])
+        self.assertFalse(result["reference"]["scored_candidate"])
+
+    def test_weather_search_tacks_and_stays_off_land(self):
+        start = (18.0, -62.0)
+        destination = (17.2, -62.0)
+        profile = routing.VesselProfile.from_mapping({
+            "hull_configuration": "monohull sailboat",
+            "observed_cruise_speed_kn": 6.0,
+            "minimum_upwind_twa_deg": 40,
+        })
+        baseline = routing.shortest_water_path(start, destination)
+        requests = routing.route_weather_sample_requests(
+            baseline, "2026-08-20T20:00:00Z", profile
+        )
+        samples = [{
+            **item,
+            "conditions_available": True,
+            "maritime_available": True,
+            "wind_speed_kn": 14.0,
+            "wind_dir_deg": 180.0,
+            "wave_height_m": 0.5,
+            "current_speed_kn": 0.0,
+            "current_dir_deg": 0.0,
+        } for item in requests]
+        result = routing.optimize_sailing_route(
+            start, destination, "2026-08-20T20:00:00Z", profile, baseline, samples
+        )
+        self.assertEqual("xweather_sailing_search", result["method"])
+        self.assertTrue(result["selected"]["land_valid"])
+        self.assertEqual(0, result["selected"]["no_go_violations"])
+        self.assertGreater(result["selected"]["distance_nm"], result["reference"]["distance_nm"])
 
     def test_partial_profile_has_a_bounded_fallback_speed(self):
         profile = routing.VesselProfile.from_mapping({"waterline_length_ft": 36})

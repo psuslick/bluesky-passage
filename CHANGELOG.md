@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0 — 2026-08-23
+
+- Replaced the v2.1 direct/port/starboard corridor scorer with a bounded, time-dependent sailing heading search; the direct geodesic is now reference-only and can never win by being physically impossible but shorter.
+- Added a bundled 1.25-arc-minute dry-land mask and adaptive shortest-water A* baseline. Departure/destination and every scored ground-track segment must remain off modeled land.
+- Added hard sailing no-go constraints with a configurable/default minimum upwind TWA; an impossible upwind heading is rejected instead of assigned a slower straight-line speed.
+- Added smoother polar interpolation, conservative fallback sailing performance, wave/comfort penalties, current-vector COG/SOG, close-hauled candidate generation, major-maneuver accounting, and up to two materially different alternatives.
+- Made sailing-weather optimization require a usable wind vector; partial marine-only Xweather data now falls back to an explicitly labeled water-valid reference instead of implying a sailing solution.
+- Bounded route weather sampling to an 11-position spatiotemporal lattice around the water-valid corridor and retained backend-only credentials, two-position concurrency, normalized cache reuse, and explicit provider gaps.
+- Added routing-engine versioning to route context fingerprints so all pre-v2.2 three-corridor results become stale and their overlays remain suppressed until recalculated.
+- Reworked route-map layers: actual Garmin track, selected sailing path, alternate candidates, shortest-water reference, and direct geodesic are visually distinct; a direct reference crossing modeled land is shown as rejected.
+- Added mouse/pen/touch drag-to-pan maps, per-map persistent view state, post-drag point-click suppression, and accessible arrow-button panning while retaining zoom and fit controls.
+- Removed route-card ellipsis truncation so method and ETA text can wrap.
+- Fixed Garmin historical backfill so valid empty date-bounded KML is a successful zero-record chunk instead of aborting the job as an unusable feed; malformed/non-KML content still fails closed.
+- Preserved the v2.1.1 backfill date persistence/range audit and integration Options Flow routing fixes.
+- Added third-party notices/licenses for the derived GSHHG/basemap-data land mask and expanded the standard-library regression suite to 37 tests, including Hampton-to-Beaufort land rejection, synthetic upwind tacking, no-go rejection, and missing-wind fail-closed behavior.
+
 ## 2.1.1 — 2026-08-22
 
 - Fixed Garmin historical-backfill date inputs so administrator selections persist across Home Assistant data-event and panel redraws instead of reverting to the one-year defaults.

@@ -215,12 +215,21 @@ def _record_from_values(values: dict[str, Any]) -> TrackRecord | None:
     )
 
 
-def parse_kml(body: str | bytes) -> list[TrackRecord]:
-    """Parse every ExtendedData record in a Garmin KML feed."""
+def parse_kml(body: str | bytes, *, allow_empty: bool = False) -> list[TrackRecord]:
+    """Parse every ExtendedData record in a Garmin KML feed.
+
+    A syntactically valid KML document may legitimately contain no timestamped
+    records for a bounded historical interval. ``allow_empty`` distinguishes
+    that case from malformed/non-KML responses without weakening live-feed
+    validation.
+    """
     try:
         root = ET.fromstring(body)
     except ET.ParseError as err:
         raise KmlParseError("The Garmin response was not valid KML") from err
+
+    if _local_name(root.tag).lower() != "kml":
+        raise KmlParseError("The Garmin response was XML but not a KML document")
 
     records: list[TrackRecord] = []
     for element in root.iter():
@@ -250,7 +259,7 @@ def parse_kml(body: str | bytes) -> list[TrackRecord]:
         if record is not None:
             records.append(record)
 
-    if not records:
+    if not records and not allow_empty:
         raise KmlParseError("The Garmin feed contained no timestamped records")
     records.sort(key=lambda record: record.recorded_at_utc)
     return records

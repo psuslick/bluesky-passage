@@ -96,7 +96,7 @@ class GarminFeedClient:
             raise FeedLinkError("The MapShare link name did not return a feed")
         try:
             response.raise_for_status()
-            records = parse_kml(response.content)
+            records = parse_kml(response.content, allow_empty=bool(params))
         except (httpx.HTTPStatusError, KmlParseError) as err:
             raise FeedConnectionError("Garmin returned an unusable MapShare feed") from err
         # Never log feed bodies, coordinates, or messages.
