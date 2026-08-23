@@ -1,6 +1,6 @@
-# BlueSky Passage 2.3.2 release decisions
+# BlueSky Passage 2.3.3 release decisions
 
-These are deliberate v2.3.2 choices. Revisit them explicitly in a future
+These are deliberate v2.3.3 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
 
 

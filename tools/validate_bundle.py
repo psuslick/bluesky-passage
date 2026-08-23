@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import compileall
 import json
 from pathlib import Path
@@ -284,11 +285,24 @@ def main() -> int:
             errors.append(f"v2.3 route-deviation calculation marker missing: {marker}")
 
     websocket_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
-    if 'runtime.coordinator.async_passage_detail' not in websocket_text:
-        errors.append("Passage detail must refresh live actual-vs-modeled metrics through the coordinator")
+    if 'runtime.async_passage_detail' not in websocket_text:
+        errors.append("Passage detail WebSocket must dispatch through the BlueSkyRuntime facade")
+    if 'runtime.coordinator.async_passage_detail' in websocket_text:
+        errors.append("Passage detail WebSocket incorrectly dispatches to BlueSkyCoordinator")
+
+    # Verify the dispatch target actually owns the method without importing Home Assistant.
+    coordinator_source = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")
+    coordinator_ast = ast.parse(coordinator_source)
+    class_methods = {
+        node.name: {child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in coordinator_ast.body
+        if isinstance(node, ast.ClassDef)
+    }
+    if "async_passage_detail" not in class_methods.get("BlueSkyRuntime", set()):
+        errors.append("BlueSkyRuntime does not own async_passage_detail required by the WebSocket handler")
     for marker in ('include_analysis', 'passage_detail_failed'):
         if marker not in websocket_text:
-            errors.append(f"v2.3.2 passage-detail resilience marker missing: {marker}")
+            errors.append(f"v2.3.3 passage-detail resilience marker missing: {marker}")
     if 'include_analysis: !this._admin' not in frontend_text:
         errors.append("Admin passage editing must bypass supplemental live route analysis")
     coordinator_text = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")

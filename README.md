@@ -1,17 +1,23 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.3.2-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.3.3-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.3.2 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.3.3 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
 
+## What changed in 2.3.3
+
+Version 2.3.3 fixes the WebSocket dispatch for **View / edit**. The v2.3.2 frontend correctly requested the metadata-only edit path, but the backend handler accidentally invoked `async_passage_detail(...)` on `BlueSkyCoordinator`; that method belongs to `BlueSkyRuntime`. The resulting `AttributeError` prevented passage details from loading. The handler now dispatches through the runtime facade, and bundle validation explicitly rejects the broken coordinator call.
+
+The metadata-only edit isolation introduced in 2.3.2 remains in place: route payloads, coverage calculations, weather, and actual-vs-modeled analysis cannot block editing the passage record.
+
 ## What changed in 2.3.2
 
-Version 2.3.2 corrects an incomplete isolation boundary in the passage editor. In 2.3.1 the frontend skipped live deviation analysis, but the backend still used the full passage-detail path, which deserialized saved routes and calculated archive coverage before returning edit metadata. A failure in any of that supplemental data could therefore still block **View / edit**. The admin editor now uses a dedicated metadata-only database path. Route payloads, coverage calculations, weather, and actual-vs-modeled analysis cannot block editing the passage record.
+Version 2.3.2 corrected an incomplete isolation boundary in the passage editor. In 2.3.1 the frontend skipped live deviation analysis, but the backend still used the full passage-detail path, which deserialized saved routes and calculated archive coverage before returning edit metadata. A failure in any of that supplemental data could therefore still block **View / edit**. The admin editor uses a dedicated metadata-only database path.
 
 ## What changed in 2.3.0
 
@@ -98,7 +104,7 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.3.2**.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.3.3**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
@@ -386,7 +392,7 @@ preview and verify Garmin actually exposes older records.
 
 ### Map will not pan
 
-Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.3.2.
+Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.3.3.
 
 ### Basemap blank but overlays appear
 

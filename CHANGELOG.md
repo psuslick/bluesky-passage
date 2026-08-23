@@ -1,5 +1,11 @@
 # BlueSky Passage changelog
 
+## 2.3.3 — 2026-08-23
+
+- Fixed **View / edit** WebSocket dispatch. The v2.3.2 handler incorrectly called `runtime.coordinator.async_passage_detail(...)`, but `async_passage_detail(...)` is implemented on the `BlueSkyRuntime` facade, not `BlueSkyCoordinator`. This caused the exact Home Assistant `AttributeError` reported from `websocket.py`.
+- Corrected the bundle validator, which had accidentally required the same invalid coordinator call and therefore allowed the defect to pass validation. Validation now requires `runtime.async_passage_detail(...)` and fails if the broken coordinator dispatch reappears.
+- Retains the v2.3.2 metadata-only edit path, v2.3.1 coastal-endpoint handling, and all v2.3.0 map, analytics, and actual-vs-modeled features.
+
 ## 2.3.2 — 2026-08-23
 
 - Fixed **View / edit** still failing when any supplemental route/coverage payload could not be loaded.
