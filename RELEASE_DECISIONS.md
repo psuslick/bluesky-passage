@@ -1,7 +1,12 @@
-# BlueSky Passage 2.3.1 release decisions
+# BlueSky Passage 2.3.2 release decisions
 
-These are deliberate v2.3.1 choices. Revisit them explicitly in a future
+These are deliberate v2.3.2 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
+
+
+## Passage editing is a metadata-only operation
+
+The admin **View / edit** action uses a dedicated lightweight metadata query. It intentionally does not load or deserialize saved route versions, calculate route-context freshness, preview archive coverage, call providers, or refresh actual-vs-modeled analytics. Supplemental analysis can fail without making the user's passage metadata inaccessible.
 
 
 ## Coastal endpoint ambiguity
@@ -103,7 +108,7 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
 
 16. **Question: What happens when route semantics or inputs change?**  
     **Decision:** Fingerprint passage boundaries, departure, destination version,
-    vessel-profile revision, and routing-engine version. The v2.3.1 `isochrone-water-v3` fingerprint intentionally makes pre-2.3.1 route analyses stale so corrected coastal-endpoint handling, route waypoint timing, and modeled-route deviation semantics cannot be mixed with older saved results.
+    vessel-profile revision, and routing-engine version. The v2.3.2 `isochrone-water-v3` fingerprint intentionally makes pre-2.3.2 route analyses stale so corrected coastal-endpoint handling, route waypoint timing, and modeled-route deviation semantics cannot be mixed with older saved results.
 
 17. **Question: Is the generated path navigable?**  
     **Decision:** No. Hard land/no-go validity is a minimum coherence standard,

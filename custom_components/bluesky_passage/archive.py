@@ -56,6 +56,9 @@ class AsyncArchive:
     async def async_list_passages(self) -> list[dict[str, Any]]:
         return await self._call(self._database.list_passages)
 
+    async def async_passage_edit_detail(self, passage_id: int) -> dict[str, Any]:
+        return await self._call(self._database.passage_edit_detail, passage_id)
+
     async def async_passage_detail(self, passage_id: int) -> dict[str, Any]:
         return await self._call(self._database.passage_detail, passage_id)
 

@@ -376,6 +376,67 @@ class ArchiveTests(unittest.TestCase):
         self.archive.initialize()
         self.assertEqual("ok", self.archive.integrity_check())
 
+    def test_edit_detail_isolated_from_corrupt_route_payload(self):
+        preview = self.archive.preview_passage(
+            passage_id=None,
+            name="Editable passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_name="Slip A",
+            departure_latitude=34.7,
+            departure_longitude=-76.7,
+            notes="passage note",
+            destination={
+                "name": "Harbor B",
+                "latitude": 34.72,
+                "longitude": -76.66,
+                "arrival_radius_nm": 2.0,
+                "notes": "destination note",
+            },
+        )
+        passage = self.archive.save_passage(
+            passage_id=None,
+            preview_token=preview["preview_token"],
+            name="Editable passage",
+            start_utc="2026-08-20T19:00:00Z",
+            end_utc=None,
+            departure_name="Slip A",
+            departure_latitude=34.7,
+            departure_longitude=-76.7,
+            notes="passage note",
+            destination={
+                "name": "Harbor B",
+                "latitude": 34.72,
+                "longitude": -76.66,
+                "arrival_radius_nm": 2.0,
+                "notes": "destination note",
+            },
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO route_versions("
+                "passage_id,label,source,imported_at_utc,content_sha256,route_json,summary_json"
+                ") VALUES(?,?,?,?,?,?,?)",
+                (
+                    passage["id"],
+                    "Broken supplemental route",
+                    "test",
+                    "2026-08-20T20:00:00Z",
+                    "broken-route",
+                    "{not-json",
+                    "{also-not-json",
+                ),
+            )
+        with self.assertRaises(json.JSONDecodeError):
+            self.archive.passage_detail(passage["id"])
+        edit = self.archive.passage_edit_detail(passage["id"])
+        self.assertEqual("Editable passage", edit["name"])
+        self.assertEqual("Slip A", edit["departure_name"])
+        self.assertEqual("Harbor B", edit["destination_name"])
+        self.assertEqual("destination note", edit["destination_versions"][-1]["notes"])
+        self.assertIsNone(edit["route"])
+        self.assertIsNone(edit["coverage"])
+
     def test_v2_archive_migrates_without_losing_rows_or_routes(self):
         legacy_path = Path(self.temp.name) / "legacy.sqlite3"
         with sqlite3.connect(legacy_path) as connection:

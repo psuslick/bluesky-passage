@@ -288,15 +288,19 @@ def main() -> int:
         errors.append("Passage detail must refresh live actual-vs-modeled metrics through the coordinator")
     for marker in ('include_analysis', 'passage_detail_failed'):
         if marker not in websocket_text:
-            errors.append(f"v2.3.1 passage-detail resilience marker missing: {marker}")
+            errors.append(f"v2.3.2 passage-detail resilience marker missing: {marker}")
     if 'include_analysis: !this._admin' not in frontend_text:
         errors.append("Admin passage editing must bypass supplemental live route analysis")
+    coordinator_text = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")
+    archive_text = (COMPONENT / "archive.py").read_text(encoding="utf-8")
+    for marker in ('passage_edit_detail', 'async_passage_edit_detail'):
+        if marker not in database_text + coordinator_text + archive_text:
+            errors.append(f"v2.3.2 edit-detail isolation marker missing: {marker}")
     if 'nearest_water_point' not in land_text:
         errors.append("Coastal endpoint ambiguity resolver is missing")
-    coordinator_text = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")
     for marker in ('endpoint_adjustments', 'endpoint_notes', 'nearest_water_point'):
         if marker not in coordinator_text:
-            errors.append(f"v2.3.1 endpoint-resolution marker missing: {marker}")
+            errors.append(f"v2.3.2 endpoint-resolution marker missing: {marker}")
 
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))

@@ -1,15 +1,11 @@
-# Changelog
+# BlueSky Passage changelog
 
-## 2.3.1 — 2026-08-23
+## 2.3.2 — 2026-08-23
 
-### Fixed
-
-- Fixed **View / edit** so administrator passage editing no longer depends on supplemental actual-vs-modeled analysis. Live route analysis is now best-effort and cannot block access to passage metadata; unexpected detail failures are logged with an explicit Home Assistant error instead of surfacing only as “Unknown error.”
-- Added coastal endpoint ambiguity handling for the bundled 1.25-arc-minute land mask. A departure or destination that falls in a coarse shoreline cell can be shifted a small, bounded distance to the nearest modeled-water cell for route computation while the saved Garmin position/destination remains unchanged.
-- Destination endpoint resolution respects the configured arrival-radius concept and remains bounded; genuinely inland departure/destination coordinates still fail closed rather than being silently routed to a distant coast.
-- Route summaries now disclose any endpoint adjustment and its distance. Interior route segments still use the same hard land-intersection test; this does not weaken land rejection for the route itself.
-- Bumped the route context engine to `isochrone-water-v3` so any v2.3.0 route is marked stale and recalculated with the corrected coastal-endpoint semantics.
-- Added regression tests for a coarse coastal land cell resolving to nearby modeled water and for a genuinely inland coordinate refusing the same 2 nmi adjustment.
+- Fixed **View / edit** still failing when any supplemental route/coverage payload could not be loaded.
+- Added a dedicated lightweight passage-metadata read path used by the admin edit form. It does not deserialize saved routes, calculate route-context state, preview coverage, call weather providers, or run deviation analysis.
+- Added a regression test proving passage metadata remains editable even when the newest saved route contains deliberately malformed JSON.
+- Retains all v2.3.1 coastal-endpoint handling and all v2.3.0 map, analytics, and actual-vs-modeled features.
 
 ## 2.3.0 — 2026-08-23
 

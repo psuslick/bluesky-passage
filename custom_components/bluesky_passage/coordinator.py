@@ -687,6 +687,11 @@ class BlueSkyRuntime:
         failure. Callers opening the edit form can explicitly skip the live
         analysis, while normal passage viewing still refreshes it.
         """
+        if not include_analysis:
+            # Admin View / edit is a metadata operation. Keep it independent of
+            # route deserialization, coverage preview, weather, and deviation math.
+            return await self.archive.async_passage_edit_detail(passage_id)
+
         detail = await self.archive.async_passage_detail(passage_id)
         route = detail.get("route")
         if include_analysis and route and route.get("context_status") == "current":

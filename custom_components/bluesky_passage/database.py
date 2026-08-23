@@ -817,6 +817,46 @@ class SQLiteArchive:
                 )
             return result
 
+    def passage_edit_detail(self, passage_id: int) -> dict[str, Any]:
+        """Return only passage metadata required by the edit form.
+
+        This deliberately does not deserialize route_versions, compute route-context
+        state, or preview archive coverage. A stale/corrupt supplemental route or an
+        unrelated analytics failure must never make passage metadata uneditable.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT p.*, dv.name AS destination_name, dv.latitude AS destination_latitude,
+                       dv.longitude AS destination_longitude,
+                       dv.arrival_radius_nm AS arrival_radius_nm,
+                       dv.effective_at_utc AS destination_effective_at_utc
+                FROM passages p
+                LEFT JOIN destination_versions dv ON dv.id=p.current_destination_version_id
+                WHERE p.id=?
+                """,
+                (passage_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Passage not found")
+            passage = dict(row)
+            passage["destination_versions"] = [
+                dict(item)
+                for item in connection.execute(
+                    "SELECT * FROM destination_versions WHERE passage_id=? "
+                    "ORDER BY effective_at_utc,id",
+                    (passage_id,),
+                ).fetchall()
+            ]
+        passage["range_mode"] = (
+            "specific_time" if passage.get("ended_at_utc") else "open_ended"
+        )
+        # Explicitly omit supplemental fields. Frontend edit code does not require
+        # either value and their absence is the isolation boundary.
+        passage["route"] = None
+        passage["coverage"] = None
+        return passage
+
     def passage_detail(self, passage_id: int) -> dict[str, Any]:
         """Return one passage, destination history, coverage, and latest route."""
         passages = [item for item in self.list_passages() if item["id"] == passage_id]
