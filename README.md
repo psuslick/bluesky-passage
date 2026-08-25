@@ -1,13 +1,21 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.4.0 is a Home Assistant custom integration and responsive
+BlueSky Passage 2.5.0 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
+
+## What changed in 2.5.0
+
+Version 2.5.0 replaces the coarse-mask routing validity layer used by v2.2-v2.4. The first real passage test demonstrated that the bundled 1.25-arc-minute raster could miss thin barrier islands, so it is no longer permitted to certify or score a production route. Route generation now loads vector **NOAA ENC Direct to GIS** land and chart-coverage polygons on demand, performs land-boundary intersection checks on every candidate segment, and runs an independent high-resolution final validation before any modeled route can be saved.
+
+The routing engine fingerprint is now `enc-isochrone-v4`. Every pre-v2.5 modeled route is intentionally stale and must be recalculated. The direct geodesic remains reference-only; sailing no-go headings remain hard-rejected; vessel polars/fallback performance, Xweather wind/waves/current, and the time-dependent beam/isochrone search remain part of route scoring. v2.5.0 deliberately **fails closed** when usable NOAA ENC coverage cannot be established instead of falling back to the old coarse raster. The initial high-confidence geography provider is therefore intended for NOAA-ENC-covered U.S. waters; global high-resolution coastline support remains future work.
+
+This release also adds an in-panel **Routine alerts** switch under **Data & settings**. Disabling it immediately suppresses and dismisses routine stale-tracking, GPS, source, text, and optional zone notifications without changing the configured stale threshold. Garmin emergency-state notifications remain enabled independently. The Overview page and header show whether routine alerts are currently on or off, which is useful when a stationary inReach reports less frequently than it does underway.
 
 ## What changed in 2.4.0
 
@@ -77,19 +85,25 @@ navigation system, weather-routing authority, collision-avoidance system, or
 emergency system. Garmin/inReach and the appropriate emergency-response channel
 remain authoritative for SOS functions.
 
-The v2.3 routing engine enforces a coarse dry-land constraint and sailing no-go
-constraint because a route that crosses modeled land or assumes an impossible
-upwind heading is not useful even as a comparison. That does **not** make the
-result navigable. The bundled land mask is not a nautical chart and does not
-know depths, reefs, rocks, bridge clearances, channels, restricted areas,
-traffic, COLREGS, weather warnings, local notices, or skipper judgment. Verify
-any real voyage with appropriate charts, forecasts, routing/navigation tools,
-and seamanship.
+The v2.5 routing engine uses NOAA ENC Direct to GIS vector land and coverage
+polygons as a hard geographic screen in supported U.S. waters. Every scored
+segment must remain outside loaded ENC land polygons, and the completed route is
+independently rechecked before it can be saved. Sailing headings inside the
+configured no-go angle are also rejected rather than assigned an artificial
+straight-line speed.
 
-If Xweather is unavailable, or a sailing vessel lacks a usable wind vector for
-the requested period, BlueSky Passage saves only an explicitly labeled
-**water-valid geometric reference**. It does not manufacture a weather-optimized
-sailing path.
+Those checks establish **coherence**, not navigational safety. ENC Direct to GIS
+is itself a non-navigation GIS service, and BlueSky does not yet prove safe
+depth, under-keel clearance, reefs/rocks, bridge clearance, traffic separation,
+restricted areas, COLREGS compliance, warnings, local notices, or skipper
+judgment. Verify every real voyage using appropriate certified/current charts,
+forecasts, routing/navigation tools, and seamanship.
+
+If high-resolution ENC coverage cannot be established for the full route,
+BlueSky stops route generation. It does not silently fall back to the legacy
+coarse land raster. If Xweather is unavailable, or a sailing vessel lacks a
+usable wind vector, BlueSky may save only an explicitly labeled ENC-valid
+geometric reference; it does not claim weather optimization.
 
 ## Requirements
 
@@ -110,14 +124,13 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.4.0**.
+3. Open **BlueSky Passage** in HACS and install/update to version **2.5.0**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
 6. Open BlueSky Passage and verify archive count, earliest/latest timestamps,
    archive integrity, Garmin availability, and provider status.
-7. Recalculate any passage route. Pre-2.3 route analyses are intentionally
-   stale and must be recalculated once before using the new actual-vs-modeled comparison.
+7. Recalculate any passage route. All pre-2.5 modeled routes are intentionally stale and must be recalculated before using actual-vs-modeled comparison metrics.
 
 For a fresh installation, open **Settings → Devices & services → Add
 integration**, select **BlueSky Passage**, enter the Garmin MapShare share name
@@ -151,7 +164,7 @@ with v2.1.x.
 BlueSky Passage keeps Home Assistant's global sidebar intact and uses four top
 tabs inside its own panel:
 
-1. **Overview** — source/safety state, four current metrics, latest 24-hour
+1. **Overview** — source/safety state, current metrics including routine-alert state, latest 24-hour
    track, selected-record details, and latest exact inReach text.
 2. **History & charts** — 24 hours by default; year/all/custom/passage ranges;
    linked Garmin map and analytics; on-demand Xweather model data; optional
@@ -160,8 +173,8 @@ tabs inside its own panel:
    preview archive coverage, manage destinations, edit vessel performance, and
    calculate sailing-analysis routes.
 4. **Data & settings** — archive health, Garmin historical backfill, provider
-   status, Recorder recovery, manual imports, notification testing, and the
-   integration configuration link.
+   status, the routine-alert on/off switch, Recorder recovery, manual imports,
+   notification testing, and the integration configuration link.
 
 All authenticated Home Assistant users can view the panel. Only administrators
 can poll manually, contact Xweather, alter passage/profile data, backfill,
@@ -182,7 +195,7 @@ Route layers are deliberately distinct:
 - selected sailing-analysis path: solid green;
 - alternative sailing candidates: faint dashed green;
 - shortest-water geometric reference: amber dashed;
-- direct geodesic reference: gray dotted when water-valid, red dotted when it
+- direct geodesic reference: gray dotted when ENC-valid, red dotted when it
   intersects modeled land.
 
 The direct geodesic remains visible for context even when rejected. It is never
@@ -194,7 +207,7 @@ available even if online basemap tiles cannot load.
 ## Storage and write behavior
 
 A healthy application-class/high-endurance microSD with adequate free space can
-run every v2.2 feature. An SSD/NVMe remains a useful whole-system resilience
+run the current feature set. An SSD/NVMe remains a useful whole-system resilience
 upgrade but is not required for BlueSky Passage.
 
 Garmin is normally polled every ten minutes with a rolling 48-hour overlap.
@@ -204,9 +217,11 @@ Historical retrieval is administrator-started and chunked. Weather and routing
 run only on request and normalized provider results are cached. Chart payloads
 are bounded and shape-preserving.
 
-The bundled 1.25-arc-minute comparison land mask is about 0.4 MiB compressed.
-Its roughly 18.7 MiB bitset is decompressed lazily in memory when routing first
-needs it; it does not create ongoing disk writes.
+The legacy 1.25-arc-minute comparison land mask remains bundled for backward
+compatibility and regression tests, but v2.5 production route generation does
+not use it as a validity source. NOAA ENC route geometry is requested only when
+an administrator calculates a route and is cached in memory for a bounded
+period; it creates no continuing archive writes.
 
 Use full Home Assistant backups. Do not copy only the live `archive.sqlite3`
 file while Home Assistant is running because its WAL/SHM companions may contain
@@ -277,27 +292,27 @@ PredictWind account or write routes/history to it.
 3. Enter both Xweather values and save.
 4. In **History & charts**, choose **Weather model** and select **Fetch / refresh
    model data** to test modeled track analytics.
-5. In **Passages**, recalculate a route to use the v2.2 sailing search.
+5. In **Passages**, recalculate a route to use the v2.5 sailing search.
 
 Credentials remain in the Home Assistant config entry and are sent only from
 the backend to Xweather. They are not sent to panel JavaScript, stored in the
 voyage archive, included in diagnostics, or written into route summaries.
 
 Track analytics remain capped at 12 representative positions per operation.
-The v2.2 route planner uses a separate bounded lattice of at most **11**
+The v2.5 route planner uses a separate bounded lattice of at most **11**
 time/location positions around the shortest-water corridor, with two concurrent
 position requests and the existing normalized cache. Conditions and Maritime
 are evaluated independently so marine fields may remain available when wind is
 not, and vice versa. For a sailing vessel, however, a usable wind vector is
 required before the result can be called a sailing-weather search; otherwise
-only the water-valid reference is saved.
+only the ENC-valid reference is saved.
 
 Modeled values more than six hours from the requested sample time are rejected.
 Transient unavailable results expire from the request cache after one hour.
 Older Maritime Archive availability is provider-limited and missing historical
 marine fields remain explicit gaps.
 
-## Vessel profile and v2.2 sailing route analysis
+## Vessel profile and v2.5 sailing route analysis
 
 The vessel profile accepts whatever is known: hull configuration, dimensions,
 displacement, sail area, engine/observed cruise speed, maximum comfortable wave
@@ -314,40 +329,61 @@ Performance is resolved in this order: supplied polar interpolation when
 available, otherwise the observed/engine/hull/generic speed baseline combined
 with a conservative sail-angle/wind fallback. Xweather waves can reduce speed
 and add risk/comfort penalties. Current speed/direction is added as a vector to
-through-water vessel velocity, producing a modeled course and speed over ground.
+through-water vessel velocity, producing modeled course and speed over ground.
 
 ### Route-generation sequence
 
-The route planner first checks whether departure and destination are water
-points in the comparison mask. It builds a coarse shortest-water reference with
-an adaptive A* search when the direct segment intersects land, then revalidates
-every simplified segment against the higher-resolution mask. It samples a small
-spatiotemporal Xweather field around that water corridor. The sailing search
-then advances a beam of materially different candidate states over time,
-examining destination-oriented headings, alternative offsets, prior heading,
-and close-hauled headings. Land crossings and no-go headings are discarded
-before scoring. Current modifies COG/SOG; wind, waves, vessel performance,
-travel time, comfort risk, and major maneuvers influence candidate score.
+1. BlueSky requests NOAA ENC Direct to GIS metadata and vector polygons for the
+   passage corridor across the available berthing, harbour, approach, coastal,
+   and general scale bands.
+2. Route endpoints must lie inside usable ENC chart coverage. A coordinate that
+   falls just inside a coastal land polygon may be resolved to a nearby modeled
+   water gate within the existing bounded endpoint allowance; the user's saved
+   pin itself is never rewritten.
+3. The engine creates an adaptive A* shortest-ENC-water reference. A proposed
+   grid edge is rejected if its endpoints lie on land or if the segment crosses
+   any loaded ENC land-polygon boundary.
+4. Xweather is sampled on the existing bounded spatiotemporal lattice around the
+   reference corridor.
+5. The sailing optimizer advances a beam of candidate headings through time.
+   Land crossings and no-go headings are discarded before scoring. Vessel
+   performance, wind, waves/comfort, current-vector COG/SOG, elapsed time, and
+   major maneuvers influence the result.
+6. The selected route is then validated **again** by a separate final validator:
+   the full path must remain inside ENC coverage and each segment is retested
+   against vector land geometry with dense sampling. A failed final check means
+   no modeled ideal route is saved.
 
-The engine stores the best complete result and up to two materially different
-alternatives. The direct great-circle line and shortest-water line are references
-only. If the weather search cannot close a valid route, it saves the water-valid
-reference with an explicit warning instead of inventing an optimized route.
+The direct geodesic is always reference-only. A route cannot become a winner
+merely because a straight line is shorter. If NOAA ENC geometry cannot be
+loaded, if the route leaves supported chart coverage, or if the search cannot
+produce a valid result, BlueSky reports the failure rather than certifying the
+legacy coarse-mask path.
 
-This remains a deliberately bounded analytical search, not a commercial
-navigation-grade isochrone router. The weather field is sparse/interpolated and
-the land mask is coarse. Treat the result as a way to compare plausible sailing
-behavior against observed Garmin history—not as coordinates to transfer to a
-navigation device.
+The initial v2.5 geography implementation is intentionally conservative and
+U.S.-focused because NOAA ENC is the first high-resolution provider. It does not
+yet claim global route validity. Future providers can implement the same
+constraint interface without weakening the fail-closed rule.
 
 ## Notifications
 
-Persistent Home Assistant notifications are enabled by default. An exact
-Companion App `notify.mobile_app_...` action can be added through Configure after
-it has been tested independently in Developer Tools. Emergency transitions,
-stale tracking, persistent invalid GPS, new inReach text, Garmin source failure
-and recovery, and optional HA-zone changes operate from the continuous latest
-Garmin record and do not depend on a passage being active.
+Routine alerts can be enabled or disabled directly from **Data & settings →
+Alerts**. The current state is also shown on the Overview page and in the header.
+The switch updates the Home Assistant config-entry option immediately; a restart
+is not required.
+
+When routine alerts are **off**, BlueSky suppresses and dismisses stale-tracking,
+invalid-GPS, Garmin-source failure/recovery, new inReach text, and optional
+HA-zone notifications. The existing stale threshold is preserved, so turning
+alerts back on resumes evaluation using the same configured threshold. This is
+useful when a stationary vessel legitimately reports less often than the underway
+cadence.
+
+Garmin emergency-state notifications are deliberately independent of the routine
+switch and remain enabled. The **Test notification** action is also forced so an
+administrator can verify the notification path even while routine alerts are off.
+The integration Options Flow remains the place to change the stale threshold,
+mobile notification service, and zone-notification preference.
 
 ## Privacy model
 
@@ -358,8 +394,8 @@ and provider option values held by Home Assistant's config-entry storage.
 
 Network access occurs only when relevant: Garmin for feed/backfill requests,
 OpenStreetMap for displayed basemap tiles, PredictWind only when its view/link is
-opened, and Xweather only during an administrator-requested weather or sailing
-analysis operation. The authenticated panel receives normalized provider values
+opened, Xweather only during an administrator-requested weather or sailing
+analysis operation, and NOAA ENC Direct to GIS only during administrator-requested route preparation/validation. The authenticated panel receives normalized provider values
 but never the Xweather secret or raw upstream response envelope. Diagnostics
 redact coordinates, messages, URLs, passwords, mobile action names, and Xweather
 credential values.
@@ -398,7 +434,7 @@ preview and verify Garmin actually exposes older records.
 
 ### Map will not pan
 
-Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.4.0.
+Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.5.0.
 
 ### Basemap blank but overlays appear
 
@@ -413,12 +449,9 @@ fields null. BlueSky Passage keeps missing values null and shows warnings. A
 sailing-weather route specifically requires a usable wind vector; marine-only
 data cannot satisfy the no-go constraint.
 
-### Sailing search returns only a water-valid reference
+### Sailing route cannot be generated
 
-Check Xweather provider warnings, vessel profile, departure/destination water
-positions, and whether usable wind data exists for the requested period. The
-optimizer intentionally fails closed rather than scoring a land-crossing or
-no-go route.
+Check the Route geography status under Data & settings, the departure/destination pins, NOAA ENC coverage, Xweather warnings, vessel profile, and whether usable wind data exists for the requested period. v2.5 intentionally fails closed if high-resolution coastline coverage cannot be established or if the final validator rejects the route; it does not fall back to the legacy coarse mask.
 
 ## Future-change handoff
 
@@ -430,9 +463,7 @@ and the exact failing panel action or desired behavior.
 Preserve these invariants unless deliberately redesigning them: domain
 `bluesky_passage`; existing config entry/entity unique IDs; archive path; raw
 record immutability; source labels; preview-before-passage-save; admin-only
-mutations; provider-secret isolation; the v2.2 hard rule that direct geodesic is
-reference-only; land/no-go rejection before route scoring; and explicit
-non-navigation labeling.
+mutations; provider-secret isolation; the hard rule that the direct geodesic is reference-only; NOAA-ENC/vector land and no-go rejection before scoring; independent final route validation; fail-closed behavior when trusted geography is unavailable; and explicit non-navigation labeling.
 
 ## Development validation
 
@@ -444,24 +475,28 @@ python3 tools/validate_bundle.py
 
 The release gate compiles Python, checks JSON/manifest/HACS structure, validates
 frontend-to-backend command coverage and JavaScript syntax, scans public text for
-installation-specific secrets/URLs, verifies the bundled land-mask/notices and
-v2.2 routing/map/backfill regression markers, and runs **37** standard-library
-regression tests. The suite includes archive migration/deduplication, Garmin
-bounded history and valid-empty historical KML, passage preview/editing,
-rollback, weather gap handling, Hampton-to-Beaufort land rejection, no-go
-rejection, synthetic upwind tacking, missing-wind fail-closed behavior, and
-frontend configuration/backfill safeguards.
+installation-specific secrets/URLs, verifies the route/alert regression markers,
+and runs the standard-library regression suite. v2.5 tests include synthetic
+thin-island intersection, ENC-constrained A* detour, independent final-route
+rejection/acceptance, sailing no-go behavior, Garmin backfill handling,
+actual-vs-modeled calculations, passage editing, and the accumulated map/chart
+regressions from earlier releases.
 
-The CI workflow also runs Hassfest and HACS validation.
+The validator also rejects production routing that imports the old raster as its
+route-certification source and checks that the alert WebSocket/UI/state plumbing
+is present. CI additionally runs Hassfest and HACS validation.
 
 ## Third-party land-mask data
 
-`custom_components/bluesky_passage/data/landmask_1_25min.bit.gz` is a derived,
-bit-packed dry-land mask generated from the `basemap-data` 2.0.0 GSHHG-derived
-land/sea mask. Licensing/attribution files are included as
+`custom_components/bluesky_passage/data/landmask_1_25min.bit.gz` remains a
+derived, bit-packed land/water mask generated from `basemap-data` 2.0.0
+GSHHG-derived data. Licensing/attribution files remain included as
 `THIRD_PARTY_NOTICES.md`, `COPYING.LGPL-DATA`, and `COPYING.LESSER-DATA`.
-The mask is included only to reject obviously impossible land-crossing
-comparison segments; it is not a nautical chart.
+
+Beginning with v2.5, that raster is retained only for legacy compatibility and
+tests; it is **not** permitted to certify production route validity. NOAA ENC
+Direct to GIS geometry is fetched on demand from NOAA and is not redistributed
+inside this repository.
 
 ## License
 

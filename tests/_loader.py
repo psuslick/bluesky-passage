@@ -59,3 +59,10 @@ httpx = sys.modules.setdefault("httpx", types.ModuleType("httpx"))
 httpx.HTTPError = type("HTTPError", (Exception,), {})
 httpx.HTTPStatusError = type("HTTPStatusError", (httpx.HTTPError,), {})
 weather = load("weather")
+
+homeassistant_aiohttp = sys.modules.setdefault(
+    "homeassistant.helpers.aiohttp_client",
+    types.ModuleType("homeassistant.helpers.aiohttp_client"),
+)
+homeassistant_aiohttp.async_get_clientsession = lambda _hass: None
+coastline = load("coastline")

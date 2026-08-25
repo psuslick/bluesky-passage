@@ -1,5 +1,18 @@
 # BlueSky Passage changelog
 
+## 2.5.0 — 2026-08-25
+
+- Replaces the production coarse-raster route-validity layer after the first real-world route test exposed a land-crossing failure at the Outer Banks. The legacy 1.25-arc-minute raster remains bundled only for compatibility/regression tests and is no longer allowed to certify a scored route.
+- Adds an on-demand **NOAA ENC Direct to GIS** vector geography provider. BlueSky dynamically discovers `Land_Area` and `Coverage_area` polygon layers for berthing, harbour, approach, coastal, and general chart bands, spatially queries the passage corridor, caches the prepared geometry, and fails closed when usable ENC coverage cannot be established.
+- Adds polygon-boundary intersection checks to every production candidate segment so thin barrier islands cannot be missed merely because raster/sample points fall on water.
+- Adds an independent final-route validator that requires complete ENC coverage and rechecks every saved segment against vector land geometry at denser spacing. A route that fails final validation is not saved as an ideal/model route.
+- Bumps the routing fingerprint to `enc-isochrone-v4`, intentionally making every pre-v2.5 modeled route stale. The direct geodesic remains reference-only; sailing no-go rejection, vessel polar/fallback performance, Xweather wind/waves/current vectors, and the time-dependent beam/isochrone search remain part of scoring.
+- Limits the first rebuilt high-confidence routing geography to NOAA-ENC-covered corridors rather than pretending the legacy global raster provides reliable worldwide coastal validity. Unsupported corridors fail closed and identify the geography limitation.
+- Adds a **Routine alerts** switch in **Data & settings** that immediately enables/disables stale-tracking, invalid-GPS, Garmin-source, new-text, and optional zone notifications without changing the configured stale threshold or requiring a restart.
+- Disabling routine alerts dismisses existing routine persistent notifications and resets routine condition latches so re-enabling evaluates the current state cleanly. Garmin emergency-state notifications remain independently enabled and the test-notification action remains available.
+- Adds routine-alert **On/Off** status to the Overview metrics and header so stationary-vessel monitoring state is visible without opening integration options.
+- Expands regression validation with synthetic thin-island/vector-boundary cases, ENC-constrained A* detour tests, independent final-route validation, route-engine/version guards, and alert WebSocket/frontend/state plumbing checks.
+
 ## 2.4.0 — 2026-08-23
 
 - Adds an interactive **departure / arrival pin picker** to Create passage and View / edit. The user selects which pin to place and clicks the OpenStreetMap view; BlueSky Passage immediately populates the matching latitude/longitude fields.

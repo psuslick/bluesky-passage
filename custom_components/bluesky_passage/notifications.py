@@ -33,6 +33,7 @@ class NotificationManager:
         self.hass = runtime.hass
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._emergency_initialized = False
         self._emergency = False
         self._stale = False
         self._gps_alerted = False
@@ -58,6 +59,25 @@ class NotificationManager:
         if self._cancel_zone_listener:
             self._cancel_zone_listener()
             self._cancel_zone_listener = None
+
+    async def async_clear_routine(self) -> None:
+        """Dismiss routine BlueSky notifications when the user disables alerts."""
+        for notification_id in (
+            NOTIFICATION_STALE,
+            NOTIFICATION_GPS,
+            NOTIFICATION_SOURCE,
+            NOTIFICATION_TEXT,
+            NOTIFICATION_ZONE,
+        ):
+            persistent_notification.async_dismiss(self.hass, notification_id)
+        # Reset routine condition latches so re-enabling evaluates the current
+        # state cleanly instead of emitting a misleading recovery message.
+        self._initialized = False
+        self._stale = False
+        self._gps_alerted = False
+        self._gps_invalid_since = None
+        self._source_alerted = False
+        self._last_message_id = self._newest_message_id()
 
     def _handle_zone_change(self, event) -> None:
         old_state = event.data.get("old_state")
@@ -90,14 +110,13 @@ class NotificationManager:
             if not latest:
                 return
             emergency = latest.get("in_emergency") is True
-            stale = self.runtime.is_stale
-            gps_problem = self.runtime.gps_problem
 
-            if not self._initialized:
+            # Emergency-state transitions remain active even when the user has
+            # disabled routine alerts. Keep this latch independent so routine
+            # state can be reset/re-evaluated without repeating an SOS alert.
+            if not self._emergency_initialized:
                 self._emergency = emergency
-                self._stale = stale
-                self._last_message_id = self._newest_message_id()
-                self._initialized = True
+                self._emergency_initialized = True
                 if emergency:
                     await self._send(
                         NOTIFICATION_EMERGENCY,
@@ -106,18 +125,6 @@ class NotificationManager:
                             "Garmin MapShare reports that the inReach is in emergency mode."
                         ),
                         force=True,
-                    )
-                if stale:
-                    age = self.runtime.report_age_minutes
-                    await self._send(
-                        NOTIFICATION_STALE,
-                        "BlueSky Passage tracking is stale",
-                        (
-                            f"The latest report is about {age:.0f} minutes old; "
-                            f"the configured threshold is {self.runtime.stale_minutes} minutes."
-                            if age is not None
-                            else "No Garmin report is archived yet."
-                        ),
                     )
             else:
                 if emergency and not self._emergency:
@@ -138,6 +145,31 @@ class NotificationManager:
                     )
                 self._emergency = emergency
 
+            # Routine latches are deliberately not advanced while routine alerts
+            # are disabled. Re-enabling therefore evaluates the current stale/GPS/
+            # source state cleanly rather than assuming a suppressed alert fired.
+            if not self.runtime.notifications_enabled:
+                return
+
+            stale = self.runtime.is_stale
+            gps_problem = self.runtime.gps_problem
+            if not self._initialized:
+                self._stale = stale
+                self._last_message_id = self._newest_message_id()
+                self._initialized = True
+                if stale:
+                    age = self.runtime.report_age_minutes
+                    await self._send(
+                        NOTIFICATION_STALE,
+                        "BlueSky Passage tracking is stale",
+                        (
+                            f"The latest report is about {age:.0f} minutes old; "
+                            f"the configured threshold is {self.runtime.stale_minutes} minutes."
+                            if age is not None
+                            else "No Garmin report is archived yet."
+                        ),
+                    )
+            else:
                 if stale and not self._stale:
                     await self._send(
                         NOTIFICATION_STALE,

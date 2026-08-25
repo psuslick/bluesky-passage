@@ -51,7 +51,7 @@ from .feed import (
     GarminFeedClient,
 )
 from .database import route_context_hash
-from .land import is_land, nearest_water_point
+from .coastline import EncGeometryClient, EncGeometryError, strict_validate_route
 from .routing import (
     VesselProfile,
     optimize_sailing_route,
@@ -171,6 +171,7 @@ class BlueSkyRuntime:
             self._option(CONF_XWEATHER_CLIENT_SECRET),
         )
         self.last_weather_error: str | None = None
+        self.coastline_client = EncGeometryClient(hass)
 
     def _option(self, key: str, default: Any = None) -> Any:
         return self.entry.options.get(key, self.entry.data.get(key, default))
@@ -278,6 +279,22 @@ class BlueSkyRuntime:
             EVENT_DATA_UPDATED, {"entry_id": self.entry.entry_id, "inserted": 0}
         )
 
+    async def async_set_notifications_enabled(self, enabled: bool) -> dict[str, Any]:
+        """Enable/disable routine BlueSky notifications without a reload."""
+        options = dict(self.entry.options)
+        options[CONF_NOTIFICATIONS_ENABLED] = bool(enabled)
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        if self.notifications:
+            if enabled:
+                await self.notifications.async_process()
+            else:
+                await self.notifications.async_clear_routine()
+        self.coordinator.async_update_listeners()
+        return {
+            "notifications_enabled": self.notifications_enabled,
+            "emergency_alerts_always_enabled": True,
+        }
+
     async def async_state(self) -> dict[str, Any]:
         data = dict(
             self.coordinator.data or await self.archive.async_dashboard_state()
@@ -301,6 +318,13 @@ class BlueSkyRuntime:
             "last_ingestion": self.coordinator.last_ingestion,
             "last_garmin_request": self.coordinator.client.last_request,
             "notifications_enabled": self.notifications_enabled,
+            "routine_alerts_enabled": self.notifications_enabled,
+            "emergency_alerts_always_enabled": True,
+            "routing_geography": {
+                "provider": "NOAA ENC Direct to GIS",
+                "last_error": self.coastline_client.last_error,
+                "last_request": self.coastline_client.last_request,
+            },
             "units": {
                 "speed": self._option(CONF_SPEED_UNIT, "kn"),
                 "height": self._option(CONF_HEIGHT_UNIT, "m"),
@@ -873,16 +897,20 @@ class BlueSkyRuntime:
             },
         }
 
-        # The bundled global mask is deliberately conservative and coarse. A
-        # marina slip or narrow harbor channel can occupy a cell classified as
-        # land. Resolve only the endpoint ambiguity to nearby modeled water;
-        # every interior route segment still has to pass the hard land mask.
-        if is_land(*start):
-            resolved_start = nearest_water_point(*start, max_distance_nm=2.0)
+        # Routing Engine v2 fails closed unless high-resolution NOAA ENC vector
+        # geometry can be prepared for the corridor. The old coarse raster is no
+        # longer permitted to certify a scored route.
+        try:
+            constraint = await self.coastline_client.async_prepare(start, destination)
+        except EncGeometryError as err:
+            raise ValueError(str(err)) from err
+
+        if constraint.is_land(*start):
+            resolved_start = constraint.nearest_water_point(*start, max_distance_nm=2.0)
             if resolved_start is None:
                 raise ValueError(
-                    "The departure coordinate is more than 2 nmi from modeled water. "
-                    "Move the departure waypoint closer to navigable water."
+                    "The departure pin is on ENC land geometry and no covered-water routing gate "
+                    "was found within 2 nmi. Place the departure pin on open modeled water."
                 )
             start = (resolved_start["latitude"], resolved_start["longitude"])
             endpoint_adjustments["departure"] = {
@@ -892,31 +920,23 @@ class BlueSkyRuntime:
                 "distance_nm": round(resolved_start["distance_nm"], 2),
             }
             endpoint_warnings.append(
-                "The departure fix fell in a coastal land-mask cell; the modeled "
-                f"routing start was shifted {resolved_start['distance_nm']:.2f} nmi "
-                "to the nearest modeled-water cell. The recorded Garmin track was not changed."
+                "The departure pin intersected NOAA ENC land geometry; the modeled routing gate "
+                f"was moved {resolved_start['distance_nm']:.2f} nmi to nearby covered water. "
+                "The saved departure pin and Garmin track were not changed."
             )
 
         arrival_radius = float(detail.get("arrival_radius_nm") or 2.0)
-        if is_land(*destination):
-            # At least one coarse-cell width is allowed so a waterfront/city
-            # destination does not become unusable solely because of mask
-            # resolution. Larger configured arrival radii are honored up to a
-            # bounded 10 nmi endpoint search.
+        if constraint.is_land(*destination):
             destination_limit = min(10.0, max(1.5, arrival_radius))
-            resolved_destination = nearest_water_point(
+            resolved_destination = constraint.nearest_water_point(
                 *destination, max_distance_nm=destination_limit
             )
             if resolved_destination is None:
                 raise ValueError(
-                    "The destination coordinate falls on modeled land and no modeled-water "
-                    f"endpoint was found within {destination_limit:.1f} nmi. "
-                    "Move the destination waypoint or increase its arrival radius."
+                    "The destination pin is on ENC land geometry and no covered-water routing gate "
+                    f"was found within {destination_limit:.1f} nmi. Place the arrival pin on open modeled water."
                 )
-            destination = (
-                resolved_destination["latitude"],
-                resolved_destination["longitude"],
-            )
+            destination = (resolved_destination["latitude"], resolved_destination["longitude"])
             endpoint_adjustments["destination"] = {
                 "requested": [requested_destination[1], requested_destination[0]],
                 "routed": [destination[1], destination[0]],
@@ -924,19 +944,19 @@ class BlueSkyRuntime:
                 "distance_nm": round(resolved_destination["distance_nm"], 2),
             }
             endpoint_warnings.append(
-                "The destination fell in a coastal land-mask cell; the modeled route "
-                f"ends {resolved_destination['distance_nm']:.2f} nmi away at the nearest "
-                "modeled-water cell. The saved destination and arrival radius were not changed."
+                "The destination pin intersected NOAA ENC land geometry; the modeled arrival gate "
+                f"was moved {resolved_destination['distance_nm']:.2f} nmi to nearby covered water. "
+                "The saved destination pin was not changed."
             )
 
         profile_data = await self.archive.async_get_vessel_profile()
         profile = VesselProfile.from_mapping(profile_data["profile"])
-        # v2.2: the direct geodesic is reference-only. Build a water-valid
+        # v2.5: the direct geodesic is reference-only. Build an ENC-valid
         # geometric baseline first, then search many sailing headings through a
         # bounded Xweather field. Invalid land/no-go segments never receive a
         # score.
-        baseline = shortest_water_path(start, destination)
-        request_metadata = route_weather_sample_requests(baseline, departure, profile)
+        baseline = shortest_water_path(start, destination, constraint=constraint)
+        request_metadata = route_weather_sample_requests(baseline, departure, profile, constraint=constraint)
         request_metadata = [
             {
                 **item,
@@ -957,13 +977,20 @@ class BlueSkyRuntime:
                     warnings.extend(sample.get("warnings") or [])
         else:
             warnings.append(
-                "Xweather is not configured; using a water-valid geometric reference without sailing-weather optimization"
+                "Xweather is not configured; using an ENC-valid geometric reference without sailing-weather optimization"
             )
         summary = optimize_sailing_route(
-            start, destination, departure, profile, baseline, samples
+            start, destination, departure, profile, baseline, samples, constraint=constraint
         )
         summary["endpoint_adjustments"] = endpoint_adjustments
         summary["endpoint_notes"] = endpoint_warnings
+        validation = strict_validate_route(constraint, summary["selected"].get("coordinates") or [])
+        summary["final_validation"] = validation
+        if not validation.get("valid"):
+            raise ValueError(
+                "The generated route failed independent NOAA ENC validation: "
+                + str(validation.get("reason") or "unknown geometry failure")
+            )
         summary["actual"] = await self._actual_route_analysis(
             detail, summary["selected"], departure
         )

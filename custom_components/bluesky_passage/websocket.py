@@ -596,6 +596,29 @@ async def ws_import_rollback(hass, connection, msg) -> None:
         connection.send_result(msg["id"], result)
 
 
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/notifications_set",
+        vol.Required("enabled"): bool,
+        vol.Optional("entry_id"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_notifications_set(hass, connection, msg) -> None:
+    runtime = _runtime(hass, connection, msg)
+    if not runtime:
+        return
+    try:
+        result = await runtime.async_set_notifications_enabled(bool(msg["enabled"]))
+    except Exception as err:
+        _LOGGER.exception("BlueSky Passage could not change notification state")
+        _error(connection, msg, err)
+    else:
+        connection.send_result(msg["id"], result)
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): f"{DOMAIN}/export",
@@ -664,6 +687,7 @@ COMMANDS = (
     ws_import_chunk,
     ws_import_finish,
     ws_import_rollback,
+    ws_notifications_set,
     ws_export,
 )
 

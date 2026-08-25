@@ -1,10 +1,9 @@
 """Water-valid, sailing-aware comparison routing for BlueSky Passage.
 
-Version 2.2 replaces the former three pre-shaped corridor scorer.  The direct
-geodesic is now a reference only.  A route may be scored only when every
-segment passes the bundled dry-land mask, and sailing headings inside the
-configured/default no-go angle are rejected instead of being assigned an
-artificially slow straight-line speed.
+Version 2.5 uses a high-resolution route-constraint object supplied by the
+runtime. In production that constraint is prepared from NOAA ENC Direct to GIS
+vector polygons. The direct geodesic is reference-only; scored headings must
+pass geography and sailing no-go constraints.
 
 This remains a supplementary planning/analysis model, not a chart plotter.  It
 does not know depths, reefs, bridge clearances, restricted areas, traffic,
@@ -20,10 +19,36 @@ import math
 from typing import Any, Iterable
 
 from .calculations import haversine_nm, initial_bearing_true, parse_utc
-from .land import is_land, mask_metadata, path_is_water, segment_is_water
+from .land import is_land as legacy_is_land, mask_metadata, path_is_water as legacy_path_is_water, segment_is_water as legacy_segment_is_water
 
 EARTH_RADIUS_NM = 3440.065
-ROUTING_ENGINE_VERSION = "isochrone-water-v3"
+ROUTING_ENGINE_VERSION = "enc-isochrone-v4"
+
+
+
+
+class _LegacyConstraint:
+    """Compatibility wrapper for tests/importers that do not supply ENC geometry."""
+
+    @staticmethod
+    def is_land(latitude: float, longitude: float) -> bool:
+        return legacy_is_land(latitude, longitude)
+
+    @staticmethod
+    def segment_is_water(start, end, *, sample_spacing_nm: float = 0.25) -> bool:
+        return legacy_segment_is_water(start, end, sample_spacing_nm=sample_spacing_nm)
+
+    @staticmethod
+    def path_is_water(coordinates) -> bool:
+        return legacy_path_is_water(coordinates)
+
+    @staticmethod
+    def metadata() -> dict[str, Any]:
+        return mask_metadata()
+
+
+def _constraint(value: Any | None) -> Any:
+    return value if value is not None else _LegacyConstraint()
 
 
 def _finite(value: Any) -> float | None:
@@ -100,15 +125,16 @@ def _point_from_xy(origin: tuple[float, float], x_nm: float, y_nm: float) -> tup
     return destination_point(origin[0], origin[1], bearing, distance)
 
 
-def _simplify_water_path(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+def _simplify_water_path(points: list[tuple[float, float]], constraint: Any | None = None) -> list[tuple[float, float]]:
     if len(points) <= 2:
         return points
+    constraint = _constraint(constraint)
     result = [points[0]]
     index = 0
     while index < len(points) - 1:
         candidate = len(points) - 1
         while candidate > index + 1:
-            if segment_is_water(points[index], points[candidate]):
+            if constraint.segment_is_water(points[index], points[candidate]):
                 break
             candidate -= 1
         result.append(points[candidate])
@@ -117,22 +143,23 @@ def _simplify_water_path(points: list[tuple[float, float]]) -> list[tuple[float,
 
 
 def shortest_water_path(
-    start: tuple[float, float], destination: tuple[float, float]
+    start: tuple[float, float], destination: tuple[float, float], *, constraint: Any | None = None
 ) -> list[list[float]]:
     """Find a conservative coarse shortest-water reference with A*.
 
     The grid is adaptive and exists only for route generation; the final path is
-    revalidated against the higher-resolution bundled land mask.
+    revalidated independently by the runtime before it can be saved.
     """
-    if is_land(*start):
+    constraint = _constraint(constraint)
+    if constraint.is_land(*start):
         raise ValueError(
-            "The departure coordinate falls on the comparison land mask. Move the departure waypoint to navigable water."
+            "The departure coordinate falls on constrained land geometry. Move the departure waypoint to navigable water."
         )
-    if is_land(*destination):
+    if constraint.is_land(*destination):
         raise ValueError(
-            "The destination coordinate falls on the comparison land mask. Move the destination waypoint to navigable water."
+            "The destination coordinate falls on constrained land geometry. Move the destination waypoint to navigable water."
         )
-    if segment_is_water(start, destination):
+    if constraint.segment_is_water(start, destination):
         return [[start[1], start[0]], [destination[1], destination[0]]]
 
     direct = haversine_nm(start[0], start[1], destination[0], destination[1])
@@ -173,9 +200,9 @@ def shortest_water_path(
                             continue
                         candidate = (ix, iy)
                         latlon = point(candidate)
-                        if is_land(*latlon):
+                        if constraint.is_land(*latlon):
                             continue
-                        if not segment_is_water(endpoint, latlon):
+                        if not constraint.segment_is_water(endpoint, latlon):
                             continue
                         candidates.append((haversine_nm(endpoint[0], endpoint[1], latlon[0], latlon[1]), candidate))
                 if candidates:
@@ -212,8 +239,8 @@ def shortest_water_path(
                 if neighbor in closed:
                     continue
                 neighbor_point = point(neighbor)
-                if is_land(*neighbor_point) or not segment_is_water(
-                    current_point, neighbor_point, sample_spacing_nm=0.8
+                if constraint.is_land(*neighbor_point) or not constraint.segment_is_water(
+                    current_point, neighbor_point, sample_spacing_nm=0.25
                 ):
                     continue
                 step = haversine_nm(
@@ -236,9 +263,9 @@ def shortest_water_path(
             nodes.append(came_from[nodes[-1]])
         nodes.reverse()
         points = [start, *(point(item) for item in nodes), destination]
-        simplified = _simplify_water_path(points)
+        simplified = _simplify_water_path(points, constraint)
         coordinates = [[round(item[1], 6), round(item[0], 6)] for item in simplified]
-        if path_is_water(coordinates):
+        if constraint.path_is_water(coordinates):
             return coordinates
 
     raise ValueError(
@@ -613,9 +640,12 @@ def route_weather_sample_requests(
     baseline_coordinates: list[list[float]],
     departure_at_utc: str | datetime,
     profile: VesselProfile,
+    *,
+    constraint: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Build a bounded 11-position weather lattice around the water corridor."""
     departure = parse_utc(departure_at_utc)
+    constraint = _constraint(constraint)
     total = path_distance(baseline_coordinates)
     corridor = _clamp(total * 0.12, 12.0, 60.0)
     result: list[dict[str, Any]] = []
@@ -631,7 +661,7 @@ def route_weather_sample_requests(
                     candidate = destination_point(
                         center[0], center[1], bearing + side * 90.0, corridor * multiplier
                     )
-                    if not is_land(*candidate) and segment_is_water(center, candidate):
+                    if not constraint.is_land(*candidate) and constraint.segment_is_water(center, candidate):
                         sample = candidate
                         actual_offset = corridor * multiplier * side
                         break
@@ -747,7 +777,9 @@ def _route_candidate_from_state(
     departure: datetime,
     key: str,
     label: str,
+    constraint: Any | None = None,
 ) -> dict[str, Any]:
+    constraint = _constraint(constraint)
     path = list(state.path)
     if haversine_nm(path[-1][0], path[-1][1], destination[0], destination[1]) > 0.05:
         path.append(destination)
@@ -771,7 +803,7 @@ def _route_candidate_from_state(
         "risk_score": round(state.risk_total / max(state.elapsed_hours, 1.0), 2),
         "weather_coverage_steps": state.weather_steps,
         "maneuvers": state.maneuvers,
-        "land_valid": path_is_water(coordinates),
+        "land_valid": constraint.path_is_water(coordinates),
         "no_go_violations": 0,
         "score": round(state.score, 3),
     }
@@ -784,12 +816,15 @@ def optimize_sailing_route(
     profile: VesselProfile,
     baseline_coordinates: list[list[float]],
     weather_samples: Iterable[dict[str, Any]],
+    *,
+    constraint: Any | None = None,
 ) -> dict[str, Any]:
     """Search many water-valid headings through a sparse time-varying weather field."""
     departure = parse_utc(departure_at_utc)
+    constraint = _constraint(constraint)
     field = WeatherField(weather_samples)
     direct_distance = haversine_nm(start[0], start[1], destination[0], destination[1])
-    direct_valid = segment_is_water(start, destination)
+    direct_valid = constraint.segment_is_water(start, destination)
     baseline_distance = path_distance(baseline_coordinates)
     reference = {
         "label": "Direct geodesic reference",
@@ -799,10 +834,10 @@ def optimize_sailing_route(
         "scored_candidate": False,
     }
     baseline = {
-        "label": "Shortest water reference",
+        "label": "Shortest ENC-valid reference",
         "coordinates": baseline_coordinates,
         "distance_nm": round(baseline_distance, 2),
-        "water_valid": path_is_water(baseline_coordinates),
+        "water_valid": constraint.path_is_water(baseline_coordinates),
         "scored_candidate": False,
     }
 
@@ -810,7 +845,7 @@ def optimize_sailing_route(
         hours = baseline_distance / max(profile.base_speed_kn, 0.8)
         selected = {
             "key": "water_reference",
-            "label": "Shortest water reference",
+            "label": "Shortest ENC-valid reference",
             "coordinates": baseline_coordinates,
             "distance_nm": round(baseline_distance, 2),
             "estimated_hours": round(hours, 2),
@@ -832,13 +867,13 @@ def optimize_sailing_route(
             "profile": {**profile.completeness, "base_speed_kn": round(profile.base_speed_kn, 2)},
             "weather_used": False,
             "weather_sample_count": len(field.samples),
-            "land_mask": mask_metadata(),
+            "geography": constraint.metadata(),
             "warnings": ([
                 "No usable Xweather wind vector was available, so a sailing-aware route was not scored."
             ] if field.available and not profile.is_motor_only else []),
             "disclaimer": (
                 "Water-valid geometric reference only; no weather sailing optimization was possible. "
-                "The land mask is not a nautical chart and does not include depths, hazards, traffic, restrictions, or local notices."
+                "The route geography is a planning screen, not a certified chart, and does not by itself establish depth, hazard, traffic, restriction, or local-notice safety."
             ),
         }
 
@@ -875,7 +910,7 @@ def optimize_sailing_route(
                 final_perf = _final_leg_performance(
                     profile, state, destination, weather
                 )
-                if final_perf is not None and segment_is_water(
+                if final_perf is not None and constraint.segment_is_water(
                     (state.latitude, state.longitude), destination
                 ):
                     close_hours = remaining / max(final_perf["sog_kn"], 0.2)
@@ -921,7 +956,7 @@ def optimize_sailing_route(
                     performance["cog_deg"],
                     distance,
                 )
-                if is_land(*next_point) or not segment_is_water(
+                if constraint.is_land(*next_point) or not constraint.segment_is_water(
                     (state.latitude, state.longitude), next_point
                 ):
                     continue
@@ -982,7 +1017,7 @@ def optimize_sailing_route(
         hours = baseline_distance / max(profile.base_speed_kn, 0.8)
         selected = {
             "key": "water_reference",
-            "label": "Shortest water reference",
+            "label": "Shortest ENC-valid reference",
             "coordinates": baseline_coordinates,
             "distance_nm": round(baseline_distance, 2),
             "estimated_hours": round(hours, 2),
@@ -1004,12 +1039,12 @@ def optimize_sailing_route(
             "profile": {**profile.completeness, "base_speed_kn": round(profile.base_speed_kn, 2)},
             "weather_used": True,
             "weather_sample_count": len(field.samples),
-            "land_mask": mask_metadata(),
+            "geography": constraint.metadata(),
             "warnings": [
-                "The sailing search could not close a complete route with the available modeled weather; the saved line is a water-valid reference, not an optimized sailing path."
+                "The sailing search could not close a complete route with the available modeled weather; the saved line is a ENC-valid reference, not an optimized sailing path."
             ],
             "disclaimer": (
-                "Planning aid only. The land mask is not a nautical chart and the model does not include depths, reefs, traffic, restrictions, COLREGS, or local notices."
+                "Planning aid only. Coastline screening does not establish safe depth, reef clearance, traffic separation, restrictions, COLREGS compliance, or local notices."
             ),
         }
 
@@ -1034,6 +1069,7 @@ def optimize_sailing_route(
             departure,
             f"optimized_{index + 1}",
             "Optimized sailing path" if index == 0 else f"Alternative {index + 1}",
+            constraint,
         )
         for index, state in enumerate(chosen_states)
     ]
@@ -1051,9 +1087,9 @@ def optimize_sailing_route(
         "profile": {**profile.completeness, "base_speed_kn": round(profile.base_speed_kn, 2)},
         "weather_used": True,
         "weather_sample_count": len(field.samples),
-        "land_mask": mask_metadata(),
+        "geography": constraint.metadata(),
         "disclaimer": (
-            "Planning/analysis aid only—not a navigable route. Every scored segment passed the bundled dry-land mask and no-go headings were rejected, but the model does not include charted depths, reefs, bridge clearances, traffic, restricted areas, COLREGS, warnings, local notices, or skipper judgment."
+            "Planning/analysis aid only—not a navigable route. Every scored segment passed the prepared route geography constraint and no-go headings were rejected, but the model does not establish safe depth, reef or bridge clearance, traffic, restricted areas, COLREGS, warnings, local notices, or skipper judgment."
         ),
     }
 
@@ -1069,7 +1105,7 @@ def candidate_routes(
         "label": "Direct geodesic reference",
         "coordinates": direct,
         "distance_nm": round(path_distance(direct), 2),
-        "water_valid": segment_is_water(start, destination),
+        "water_valid": legacy_segment_is_water(start, destination),
         "scored_candidate": False,
     }]
 

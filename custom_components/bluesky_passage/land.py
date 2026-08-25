@@ -1,9 +1,9 @@
-"""Conservative global dry-land rejection for comparison routing.
+"""Legacy coarse land-mask helpers retained for compatibility and tests.
 
-The bundled bit mask is intentionally used as a *hard* invalidation test: a
-comparison segment that intersects a land cell is not scored.  It is not a
-nautical chart and does not model depths, reefs, bridge clearances, restricted
-waters, traffic separation schemes, or local hazards.
+Beginning with BlueSky Passage 2.5, production route generation is constrained
+by the NOAA ENC vector provider in ``coastline.py`` and does not use this raster
+to certify a route. The bundled 1.25-arc-minute mask remains useful for legacy
+imports/regression fixtures only and is not a nautical chart.
 """
 
 from __future__ import annotations

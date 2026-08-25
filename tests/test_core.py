@@ -11,6 +11,7 @@ import unittest
 
 from _loader import (
     calculations,
+    coastline,
     database,
     exporting,
     garmin_dates,
@@ -221,6 +222,89 @@ class LandEndpointTests(unittest.TestCase):
         )
 
 
+class EncGeometryTests(unittest.TestCase):
+    def _constraint(self):
+        land_payload = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0.45,-0.12],[0.55,-0.12],[0.55,0.12],[0.45,0.12],[0.45,-0.12]]],
+                },
+                "properties": {},
+            }],
+        }
+        coverage_payload = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[-2,-2],[2,-2],[2,2],[-2,2],[-2,-2]]],
+                },
+                "properties": {},
+            }],
+        }
+        return coastline.EncConstraint(
+            coastline._geojson_polygons(land_payload, "test"),
+            coastline._geojson_polygons(coverage_payload, "test"),
+            ("test",),
+            (-2,-2,2,2),
+            "2026-08-25T00:00:00Z",
+        )
+
+    def test_thin_land_polygon_blocks_a_crossing_segment(self):
+        constraint = self._constraint()
+        self.assertFalse(constraint.segment_is_water((0.0, 0.0), (0.0, 1.0)))
+        self.assertTrue(constraint.segment_is_water((0.3, 0.0), (0.3, 1.0)))
+
+    def test_route_search_detours_and_final_validator_rejects_direct(self):
+        constraint = self._constraint()
+        direct = [[0.0,0.0],[1.0,0.0]]
+        validation = coastline.strict_validate_route(constraint, direct)
+        self.assertFalse(validation["valid"])
+        path = routing.shortest_water_path((0.0,0.0),(0.0,1.0), constraint=constraint)
+        self.assertTrue(constraint.path_is_water(path))
+        self.assertGreater(routing.path_distance(path), calculations.haversine_nm(0.0,0.0,0.0,1.0))
+        self.assertTrue(coastline.strict_validate_route(constraint, path)["valid"])
+
+
+class EncClientContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_layer_discovery_selects_polygon_land_and_coverage_layers(self):
+        client = coastline.EncGeometryClient(object())
+
+        async def fake_json(url, params):
+            self.assertTrue(url.endswith("/enc_approach/MapServer"))
+            return {
+                "layers": [
+                    {"id": 41, "name": "Approach.Land_Area_point", "geometryType": "esriGeometryPoint"},
+                    {"id": 224, "name": "Approach.Coverage_area", "geometryType": "esriGeometryPolygon"},
+                    {"id": 238, "name": "Approach.Land_Area", "geometryType": "esriGeometryPolygon"},
+                ]
+            }
+
+        client._json = fake_json
+        metadata = await client._band_metadata("enc_approach")
+        self.assertEqual({"land": 238, "coverage": 224}, metadata)
+
+    async def test_arcgis_query_requests_geojson_geometry_without_assuming_objectid_name(self):
+        client = coastline.EncGeometryClient(object())
+        seen = {}
+
+        async def fake_json(url, params):
+            seen.update(params)
+            return {"type": "FeatureCollection", "features": []}
+
+        client._json = fake_json
+        await client._query_layer("enc_approach", 238, (-76.0, 35.0, -75.0, 36.0))
+        self.assertEqual("geojson", seen["f"])
+        self.assertEqual("*", seen["outFields"])
+        self.assertEqual("esriGeometryEnvelope", seen["geometryType"])
+        self.assertEqual("4326", seen["outSR"])
+
+
+
 class RoutingTests(unittest.TestCase):
     def test_no_weather_is_explicit_water_valid_reference(self):
         profile = routing.VesselProfile.from_mapping({})
@@ -231,7 +315,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual("water_reference", result["selected"]["key"])
         self.assertTrue(result["selected"]["land_valid"])
         self.assertFalse(result["reference"]["scored_candidate"])
-        self.assertIn("not a nautical chart", result["disclaimer"])
+        self.assertIn("planning", result["disclaimer"].lower())
 
     def test_direct_hampton_to_beaufort_is_rejected_and_water_path_detours(self):
         start = (36.99, -76.30)

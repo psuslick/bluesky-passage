@@ -133,6 +133,7 @@ def main() -> int:
         COMPONENT / "brand" / "icon.svg",
         COMPONENT / "brand" / "icon.png",
         COMPONENT / "data" / "landmask_1_25min.bit.gz",
+        COMPONENT / "coastline.py",
         ROOT / "THIRD_PARTY_NOTICES.md",
         ROOT / "COPYING.LGPL-DATA",
         ROOT / "COPYING.LESSER-DATA",
@@ -225,7 +226,7 @@ def main() -> int:
         "_panMap",
         'addEventListener("pointerdown"',
         "Rejected · crosses modeled land",
-        "Shortest water reference",
+        "Shortest ENC-valid reference",
         "Minimum upwind TWA / no-go (deg)",
     ):
         if required_frontend_marker not in frontend_text:
@@ -271,7 +272,7 @@ def main() -> int:
 
     routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
     for marker in (
-        'ROUTING_ENGINE_VERSION = "isochrone-water-v3"',
+        'ROUTING_ENGINE_VERSION = "enc-isochrone-v4"',
         "segment_is_water",
         "minimum_upwind_twa_deg",
         '"scored_candidate": False',
@@ -287,8 +288,8 @@ def main() -> int:
         errors.append("Bounded Garmin empty-KML handling regression guard is missing")
 
     database_text = (COMPONENT / "database.py").read_text(encoding="utf-8")
-    if '"routing_engine": "isochrone-water-v3"' not in database_text:
-        errors.append("Route context does not invalidate pre-v2.3 route/deviation semantics")
+    if '"routing_engine": "enc-isochrone-v4"' not in database_text:
+        errors.append("Route context does not invalidate pre-v2.5 coarse-mask route semantics")
 
     land_text = (COMPONENT / "land.py").read_text(encoding="utf-8")
     for marker in ("landmask_1_25min.bit.gz", "segment_is_water", "path_is_water"):
@@ -330,11 +331,51 @@ def main() -> int:
     for marker in ('passage_edit_detail', 'async_passage_edit_detail'):
         if marker not in database_text + coordinator_text + archive_text:
             errors.append(f"v2.3.2 edit-detail isolation marker missing: {marker}")
-    if 'nearest_water_point' not in land_text:
-        errors.append("Coastal endpoint ambiguity resolver is missing")
-    for marker in ('endpoint_adjustments', 'endpoint_notes', 'nearest_water_point'):
+    coastline_text = (COMPONENT / "coastline.py").read_text(encoding="utf-8")
+    for marker in (
+        'ENC_ROOT = "https://encdirect.noaa.gov/arcgis/rest/services/encdirect"',
+        'EncGeometryClient',
+        'EncConstraint',
+        'strict_validate_route',
+        '.Land_Area',
+        '.Coverage_area',
+        'segment_intersects_boundary',
+        'coverage_for_path',
+        '"outFields": "*"',
+    ):
+        if marker not in coastline_text:
+            errors.append(f"v2.5 ENC geography marker missing: {marker}")
+    for marker in ('endpoint_adjustments', 'endpoint_notes', 'constraint.nearest_water_point'):
         if marker not in coordinator_text:
-            errors.append(f"v2.3.2 endpoint-resolution marker missing: {marker}")
+            errors.append(f"v2.5 endpoint-resolution marker missing: {marker}")
+    if 'from .land import is_land' in coordinator_text or 'from .land import segment_is_water' in coordinator_text:
+        errors.append("Production coordinator must not certify routes with the legacy raster land API")
+    for marker in (
+        'EncGeometryClient',
+        'await self.coastline_client.async_prepare',
+        'constraint=constraint',
+        'strict_validate_route(constraint',
+        'final_validation',
+    ):
+        if marker not in coordinator_text:
+            errors.append(f"v2.5 production routing marker missing: {marker}")
+
+    notifications_text = (COMPONENT / "notifications.py").read_text(encoding="utf-8")
+    for marker in ('async_clear_routine', '_emergency_initialized', 'if not self.runtime.notifications_enabled:', 'if not force and not self.runtime.notifications_enabled', 'force=True'):
+        if marker not in notifications_text:
+            errors.append(f"v2.5 alert behavior marker missing: {marker}")
+    for marker in ('notifications_set', 'runtime.async_set_notifications_enabled'):
+        if marker not in websocket_text:
+            errors.append(f"v2.5 alert WebSocket marker missing: {marker}")
+    for marker in ('routine_alerts_enabled', 'emergency_alerts_always_enabled', 'async_set_notifications_enabled'):
+        if marker not in coordinator_text:
+            errors.append(f"v2.5 alert runtime marker missing: {marker}")
+    for marker in ('toggle-alerts', 'Routine alerts on', 'Routine alerts off', 'Alerts ${runtime.routine_alerts_enabled ? "on" : "off"}'):
+        if marker not in frontend_text:
+            errors.append(f"v2.5 alert frontend marker missing: {marker}")
+    for marker in ('Route validation', 'NOAA ENC Direct to GIS', 'Shortest ENC-valid reference'):
+        if marker not in frontend_text:
+            errors.append(f"v2.5 routing frontend marker missing: {marker}")
 
     backend_text = (COMPONENT / "websocket.py").read_text(encoding="utf-8")
     client_commands = set(re.findall(r'this\._call\("([a-z_]+)"', frontend_text))

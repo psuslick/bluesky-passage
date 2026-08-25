@@ -1,7 +1,15 @@
-# BlueSky Passage 2.4.0 release decisions
+# BlueSky Passage 2.5.0 release decisions
 
-These are deliberate v2.4.0 choices. Revisit them explicitly in a future
+These are deliberate v2.5.0 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
+
+## Routing validity reset
+
+The only real-world v2.4 route test produced a path that visibly crossed the Outer Banks. v2.5 therefore treats the former coarse-mask routing model as unvalidated. Production route generation no longer uses the bundled 1.25-arc-minute raster to certify a route. NOAA ENC Direct to GIS vector land/coverage polygons are the initial hard geography provider, and the route is independently validated before save. If that provider cannot establish coverage, the engine fails closed.
+
+## Routine-alert control
+
+Routine stale/GPS/source/text/zone notifications can be switched on or off from BlueSky **Data & settings** without a restart. The Overview/header always disclose the current routine-alert state. Emergency-state notifications remain independent and forced on; disabling routine alerts must not suppress a Garmin emergency transition.
 
 
 ## Passage coordinate picker
@@ -16,7 +24,7 @@ The admin **View / edit** action uses a dedicated lightweight metadata query. It
 
 ## Coastal endpoint ambiguity
 
-The bundled global land mask remains a conservative, non-navigation-grade 1.25-arc-minute mask. Passage route endpoints that fall in a coarse shoreline cell may be resolved to the nearest modeled-water cell within a small bounded distance (2 nmi for departure; destination uses at least 1.5 nmi and the configured arrival-radius concept, capped at 10 nmi). The original passage/destination coordinates are preserved and the adjustment is disclosed in the route summary. Interior route segments are never granted this exception.
+NOAA ENC vector land geometry is authoritative for the v2.5 comparison screen. A saved departure/destination pin that falls just inside a coastal land polygon may be resolved only to a nearby **modeled routing gate** within the existing bounded allowance (2 nmi for departure; destination uses at least 1.5 nmi and the configured arrival-radius concept, capped at 10 nmi). The original user coordinate is never rewritten, and any adjustment is disclosed. Interior route segments receive no endpoint exception.
 
 ## Passage-detail resilience
 
@@ -24,13 +32,13 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
 
 1. **Question: Is an SSD required?**  
    **Decision:** No. A healthy application-class/high-endurance microSD with
-   adequate free space can run every v2.2 feature. SSD/NVMe remains a recommended
+   adequate free space can run the current feature set. SSD/NVMe remains a recommended
    later whole-system resilience upgrade.
 
 2. **Question: Should this require a separate add-on/database/service?**  
    **Decision:** No. Ship one HACS custom integration containing the archive,
-   authenticated API, panel, weather adapter, land-mask reader, and sailing
-   analysis engine.
+   authenticated API, panel, weather adapter, NOAA ENC geography adapter, and
+   sailing analysis engine.
 
 3. **Question: Where is permanent data stored?**  
    **Decision:** Preserve `/config/bluesky_passage/archive.sqlite3` outside the
@@ -40,7 +48,8 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
    **Decision:** Poll Garmin every ten minutes with a rolling 48-hour overlap,
    deduplicate before insert, use bounded SQLite WAL/checkpoints, chunk backfill,
    cache normalized provider data, and run weather/routing only on administrator
-   request. The bundled land mask is static and decompressed lazily in memory.
+   request. NOAA ENC geometry is fetched only on route calculation and cached in
+   memory for a bounded period; the legacy raster is not a production route-certification source.
 
 5. **Question: How is Garmin history recovered?**  
    **Decision:** Use preview-first, resumable, rollbackable seven-day chunks with
@@ -73,7 +82,7 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
     **Decision:** Use optional Xweather Weather API credentials on the Home
     Assistant backend only. Track analytics remain capped at 12 representative
     locations. Route analysis uses a separate lattice of at most 11 positions
-    around the water-valid baseline, with two concurrent position requests.
+    around the ENC-valid baseline, with two concurrent position requests.
     Cache normalized values, preserve gaps, reject provider periods more than
     six hours from requested time, and expire transient unavailable results
     after one hour.
@@ -88,13 +97,14 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
     scored. If it intersects modeled land, show it as rejected rather than
     allowing its short distance to dominate route score.
 
-13. **Question: How is land handled?**  
-    **Decision:** Bundle a 1.25-arc-minute dry-land mask derived from
-    `basemap-data`/GSHHG data. Departure/destination must resolve to water for the
-    comparison. Build a shortest-water A* reference when direct crosses land,
-    and reject every scored segment that intersects the mask. Explicitly state
-    that the mask is not a nautical chart and contains no depth/hazard/channel
-    knowledge.
+13. **Question: How is route geography handled?**  
+    **Decision:** In v2.5 production routing, use NOAA ENC Direct to GIS vector
+    `Land_Area` and `Coverage_area` polygons across available chart scale bands.
+    Dynamically discover layer IDs from service metadata rather than hardcoding
+    them. Reject every candidate segment that intersects a loaded land polygon,
+    require usable ENC coverage for the complete final path, and independently
+    revalidate the selected route before save. Retain the old raster only for
+    compatibility/tests. If trusted vector coverage is unavailable, fail closed.
 
 14. **Question: How is sailing feasibility handled?**  
     **Decision:** For sailing hulls, require a usable wind vector and reject
@@ -103,23 +113,24 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
     tacks/heading changes when required.
 
 15. **Question: What does the route engine do?**  
-    **Decision:** Start from the water-valid geometric corridor and run a bounded,
-    time-dependent beam/isochrone-style heading search. Evaluate destination
-    headings, offsets, prior heading, and close-hauled options. Use polar/fallback
-    vessel performance, wind, wave/comfort effects, and current-vector COG/SOG.
-    Reject invalid states before scoring, keep the best complete path and up to
-    two materially different alternatives, and save only a water-valid reference
-    if the sailing search cannot close.
+    **Decision:** Build an ENC-valid A* reference and run a bounded, time-dependent
+    beam/isochrone-style sailing search. Evaluate destination headings, offsets,
+    prior heading, and close-hauled options. Use polar/fallback vessel performance,
+    wind, wave/comfort effects, and current-vector COG/SOG. Reject land/no-go
+    states before scoring, keep the best complete path and up to two materially
+    different alternatives, then pass the winner to a separate final validator.
+    A route that fails that validator is not saved as an ideal route.
 
 16. **Question: What happens when route semantics or inputs change?**  
     **Decision:** Fingerprint passage boundaries, departure, destination version,
-    vessel-profile revision, and routing-engine version. The v2.3.2 `isochrone-water-v3` fingerprint intentionally makes pre-2.3.2 route analyses stale so corrected coastal-endpoint handling, route waypoint timing, and modeled-route deviation semantics cannot be mixed with older saved results.
+    vessel-profile revision, and routing-engine version. The v2.5 `enc-isochrone-v4` fingerprint intentionally makes every pre-v2.5 route analysis stale so coarse-mask validity cannot be mixed with the new ENC/vector route semantics.
 
 17. **Question: Is the generated path navigable?**  
-    **Decision:** No. Hard land/no-go validity is a minimum coherence standard,
-    not navigation certification. The engine does not know depths, reefs,
-    bridges, traffic, restrictions, COLREGS, warnings, or local notices and the
-    weather field is intentionally sparse/bounded.
+    **Decision:** No. NOAA ENC vector land/coverage checks and sailing no-go
+    rejection are minimum coherence standards, not navigation certification.
+    ENC Direct to GIS is not a certified navigation product, and the engine does
+    not yet establish safe depth, reef/rock or bridge clearance, traffic,
+    restrictions, COLREGS, warnings, or local notices.
 
 18. **Question: How should route layers appear?**  
     **Decision:** Keep actual Garmin track, selected sailing path, alternatives,
@@ -157,10 +168,13 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
     **Decision:** Knots for speed and meters for height, configurable in
     integration options without changing normalized archive values.
 
-25. **Question: Do alerts depend on a passage?**  
-    **Decision:** No. Emergency, stale tracking, invalid GPS, new text, source
-    failure/recovery, and optional HA-zone changes operate from the continuous
-    latest Garmin record.
+25. **Question: Do alerts depend on a passage, and can they be disabled?**  
+    **Decision:** Alerts do not depend on a passage. Routine stale tracking,
+    invalid GPS, new text, source failure/recovery, and optional HA-zone changes
+    operate from the continuous latest Garmin record and can be disabled from
+    Data & settings. Disabling routine alerts preserves the stale threshold and
+    dismisses routine persistent notifications. Emergency-state transitions stay
+    enabled independently and are never suppressed by the routine-alert switch.
 
 26. **Question: What backup behavior is required?**  
     **Decision:** Require a full Home Assistant backup before upgrade and verify
@@ -191,3 +205,16 @@ Opening the administrator edit form does not require live actual-vs-modeled anal
     **Decision:** No. Preserve the saved modeled route and refresh the Garmin-side
     comparison whenever passage detail is requested. Recalculate the weather route
     only when the route inputs/context change or the user explicitly requests it.
+31. **Question: What geography coverage is claimed in the first rebuilt router?**  
+    **Decision:** High-confidence production route generation is initially limited
+    to corridors where NOAA ENC coverage can be established. Do not silently use
+    the legacy global raster to claim worldwide route validity. A future global
+    high-resolution provider must implement the same constraint/final-validation
+    contract before global routing is advertised.
+
+32. **Question: Should the search certify its own result?**  
+    **Decision:** No. The search and final validator are separate stages. The final
+    validator samples the complete selected path inside ENC coverage and rechecks
+    every segment against vector land geometry at denser spacing. Failure blocks
+    saving the route.
+
