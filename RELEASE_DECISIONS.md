@@ -1,7 +1,31 @@
-# BlueSky Passage 2.5.0 release decisions
+# BlueSky Passage 3.0.0 release decisions
 
-These are deliberate v2.5.0 choices. Revisit them explicitly in a future
+These are deliberate v3.0.0 choices. Revisit them explicitly in a future
 version rather than treating them as accidental implementation details.
+
+## Routing Engine v3 boundary
+
+The previous production route scorer is retired from coordinator execution. Routing runs through the standalone `routing_engine` package; legacy `routing.py` remains only for compatibility helpers and historical regression tests. No weather or safety failure may fall back to a line labeled as an optimized/ideal route.
+
+## Deterministic search bounds
+
+Routing Engine v3 uses a deterministic destination-centered heading lattice, deterministic numeric tie-breaking, bounded beam width, and a hard search horizon. Once the first valid arrival is found, one additional generation is evaluated to catch a nearby better arrival and then the leg terminates. This rule was added after final release validation exposed an unnecessary post-completion search tail in the shallow-water scenario.
+
+## Environment and current data
+
+The routing engine consumes a provider-neutral environmental field. v3.0.0 still sources live wind, waves, and any available current vectors from Xweather. Direct NOAA S-111/RTOFS ingestion is intentionally deferred until its binary/current-product handling can be integrated and tested without adding an unreliable provider path.
+
+## Safety and depth
+
+NOAA ENC land, coverage, depth-area, and unsurveyed-area polygons are planning constraints, not certified navigation data. When draft is configured, minimum modeled water depth is draft plus the user under-keel margin (default 3 ft). Missing depth at a checked point fails closed rather than being silently assumed safe. A separate final validator must pass before a route is saved.
+
+## Routing gates
+
+Up to 12 ordered routing gates may be attached to a passage through the map editor. They are hard must-pass points, participate in route-context hashing, and invalidate an earlier passage preview if changed. Gates are never silently moved by the router.
+
+## Licensing/source-reference decision
+
+The repository remains MIT for v3.0.0. Bareboat Necessities, OpenCPN Weather Routing, and libweatherrouting were used as behavioral/architectural references, but this release does not vendor or copy their GPL-covered routing source. The v3 engine implementation in this repository is original BlueSky code.
 
 ## Routing validity reset
 

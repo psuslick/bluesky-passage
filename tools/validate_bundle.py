@@ -252,7 +252,7 @@ def main() -> int:
 
     for required_v24_marker in (
         'data-picker="passage"',
-        'Set departure and arrival on map',
+        'Set departure, routing gates, and arrival on map',
         'Place departure',
         'Place arrival',
         '_placePassagePin(event, map)',
@@ -264,6 +264,15 @@ def main() -> int:
         if required_v24_marker not in frontend_text:
             errors.append(f"v2.4 passage-pin UI marker missing: {required_v24_marker}")
 
+    for required_v3_marker in (
+        'add-routing-gate',
+        'routing_gates',
+        'under_keel_clearance_ft',
+        'polar_text',
+    ):
+        if required_v3_marker not in frontend_text:
+            errors.append(f"v3 routing editor marker missing: {required_v3_marker}")
+
     tracker_text = (COMPONENT / "device_tracker.py").read_text(encoding="utf-8")
     if 'from homeassistant.components.device_tracker import SourceType, TrackerEntity' not in tracker_text:
         errors.append("TrackerEntity must use the current homeassistant.components.device_tracker import path")
@@ -271,16 +280,32 @@ def main() -> int:
         errors.append("Deprecated TrackerEntity config_entry alias must not be used")
 
     routing_text = (COMPONENT / "routing.py").read_text(encoding="utf-8")
+    routing_engine_path = COMPONENT / "routing_engine" / "engine.py"
+    routing_engine_init = COMPONENT / "routing_engine" / "__init__.py"
+    for required in (routing_engine_path, routing_engine_init):
+        if not required.is_file():
+            errors.append(f"Routing Engine v3 file missing: {required.relative_to(ROOT)}")
+    routing_engine_text = routing_engine_path.read_text(encoding="utf-8") if routing_engine_path.is_file() else ""
     for marker in (
-        'ROUTING_ENGINE_VERSION = "enc-isochrone-v4"',
-        "segment_is_water",
+        'ROUTING_ENGINE_VERSION = "weather-routing-v3-isochrone-enc-depth"',
         "minimum_upwind_twa_deg",
-        '"scored_candidate": False',
-        '"method": "xweather_sailing_search"',
-        "_final_leg_performance",
+        "parse_pol_text",
+        "under_keel_clearance_ft",
+        "minimum_depth_m",
     ):
         if marker not in routing_text:
-            errors.append(f"v2.2 routing validity marker missing: {marker}")
+            errors.append(f"Routing Engine v3 vessel/profile marker missing: {marker}")
+    for marker in (
+        'ENGINE_VERSION = "weather-routing-v3-isochrone-enc-depth"',
+        "class RoutingEngineError",
+        "def route_passage(",
+        "first_completion_iteration",
+        "performance_on_heading",
+        "segment_is_safe",
+        '"method": "weather_routing_v3"',
+    ):
+        if marker not in routing_engine_text:
+            errors.append(f"Routing Engine v3 core marker missing: {marker}")
 
     parser_text = (COMPONENT / "parser.py").read_text(encoding="utf-8")
     feed_text = (COMPONENT / "feed.py").read_text(encoding="utf-8")
@@ -288,8 +313,10 @@ def main() -> int:
         errors.append("Bounded Garmin empty-KML handling regression guard is missing")
 
     database_text = (COMPONENT / "database.py").read_text(encoding="utf-8")
-    if '"routing_engine": "enc-isochrone-v4"' not in database_text:
-        errors.append("Route context does not invalidate pre-v2.5 coarse-mask route semantics")
+    if '"routing_engine": "weather-routing-v3-isochrone-enc-depth"' not in database_text:
+        errors.append("Route context does not invalidate pre-v3 route semantics")
+    if 'routing_gates_json' not in database_text or '"routing_gates"' not in database_text:
+        errors.append("Routing gates are missing from passage persistence/context")
 
     land_text = (COMPONENT / "land.py").read_text(encoding="utf-8")
     for marker in ("landmask_1_25min.bit.gz", "segment_is_water", "path_is_water"):
@@ -324,6 +351,9 @@ def main() -> int:
     for marker in ('include_analysis', 'passage_detail_failed'):
         if marker not in websocket_text:
             errors.append(f"v2.3.3 passage-detail resilience marker missing: {marker}")
+    for marker in ('ROUTING_GATE_SCHEMA', 'routing_gates'):
+        if marker not in websocket_text:
+            errors.append(f"v3 routing gate WebSocket marker missing: {marker}")
     if 'include_analysis: !this._admin' not in frontend_text:
         errors.append("Admin passage editing must bypass supplemental live route analysis")
     coordinator_text = (COMPONENT / "coordinator.py").read_text(encoding="utf-8")
@@ -339,12 +369,17 @@ def main() -> int:
         'strict_validate_route',
         '.Land_Area',
         '.Coverage_area',
+        '.Depth_Area',
+        '.Unsurveyed_Area',
         'segment_intersects_boundary',
         'coverage_for_path',
+        'minimum_depth_m',
+        'segment_is_safe',
+        'path_is_safe',
         '"outFields": "*"',
     ):
         if marker not in coastline_text:
-            errors.append(f"v2.5 ENC geography marker missing: {marker}")
+            errors.append(f"v3 ENC geography marker missing: {marker}")
     for marker in ('endpoint_adjustments', 'endpoint_notes', 'constraint.nearest_water_point'):
         if marker not in coordinator_text:
             errors.append(f"v2.5 endpoint-resolution marker missing: {marker}")
@@ -353,12 +388,16 @@ def main() -> int:
     for marker in (
         'EncGeometryClient',
         'await self.coastline_client.async_prepare',
+        'minimum_depth_m=profile.minimum_depth_m',
+        'route_passage(',
+        'RoutingEngineError',
         'constraint=constraint',
-        'strict_validate_route(constraint',
+        'validation = strict_validate_route(',
         'final_validation',
+        'Routing Engine v3 sailing route',
     ):
         if marker not in coordinator_text:
-            errors.append(f"v2.5 production routing marker missing: {marker}")
+            errors.append(f"v3 production routing marker missing: {marker}")
 
     notifications_text = (COMPONENT / "notifications.py").read_text(encoding="utf-8")
     for marker in ('async_clear_routine', '_emergency_initialized', 'if not self.runtime.notifications_enabled:', 'if not force and not self.runtime.notifications_enabled', 'force=True'):
@@ -383,6 +422,26 @@ def main() -> int:
     missing = sorted(client_commands - server_commands)
     if missing:
         errors.append(f"Frontend calls missing WebSocket commands: {', '.join(missing)}")
+
+    scenario_runner = TOOLS / "run_routing_scenarios.py"
+    if not scenario_runner.is_file():
+        errors.append("Routing Engine v3 headless scenario runner is missing")
+    else:
+        scenario = subprocess.run(
+            [sys.executable, str(scenario_runner)], capture_output=True, text=True, timeout=45
+        )
+        if scenario.returncode:
+            errors.append(f"Routing Engine v3 scenarios failed: {scenario.stdout.strip()} {scenario.stderr.strip()}")
+        else:
+            try:
+                scenario_payload = json.loads(scenario.stdout)
+            except json.JSONDecodeError as err:
+                errors.append(f"Routing scenario runner did not return JSON: {err}")
+            else:
+                if scenario_payload.get("engine_version") != "weather-routing-v3-isochrone-enc-depth":
+                    errors.append("Routing scenario runner engine version mismatch")
+                if scenario_payload.get("failed") != 0 or scenario_payload.get("passed", 0) < 7:
+                    errors.append("Routing scenario runner did not pass all required scenarios")
 
     loader = unittest.TestLoader()
     suite = loader.discover(str(TESTS))

@@ -11,7 +11,7 @@ navigation product.  BlueSky uses it only as a hard land-intersection screen.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 from datetime import datetime, timedelta, timezone
 import math
@@ -142,6 +142,7 @@ class Polygon:
     holes: list[list[tuple[float, float]]]
     bbox: tuple[float, float, float, float]
     source: str
+    properties: dict[str, Any] = field(default_factory=dict)
 
     def contains(self, latitude: float, longitude: float) -> bool:
         point = (longitude, latitude)
@@ -198,7 +199,7 @@ def _geojson_polygons(payload: dict[str, Any], source: str) -> list[Polygon]:
                     rings.append(ring)
             if not rings:
                 continue
-            result.append(Polygon(rings[0], rings[1:], _ring_bbox(rings[0]), source))
+            result.append(Polygon(rings[0], rings[1:], _ring_bbox(rings[0]), source, dict(feature.get("properties") or {})))
     return result
 
 
@@ -211,12 +212,56 @@ class EncConstraint:
     bands: tuple[str, ...]
     query_bbox: tuple[float, float, float, float]
     fetched_at_utc: str
+    depth: list[Polygon] = field(default_factory=list)
+    unsurveyed: list[Polygon] = field(default_factory=list)
+    minimum_depth_m: float | None = None
 
     def is_land(self, latitude: float, longitude: float) -> bool:
         return any(polygon.contains(latitude, longitude) for polygon in self.land)
 
     def is_covered(self, latitude: float, longitude: float) -> bool:
         return any(polygon.contains(latitude, longitude) for polygon in self.coverage)
+
+    @staticmethod
+    def _depth_value(polygon: Polygon) -> float | None:
+        props = {str(k).lower(): v for k, v in (polygon.properties or {}).items()}
+        values = []
+        for key in ("drval1", "depth_min", "mindepth", "minimum_depth"):
+            if key in props:
+                value = _finite(props.get(key))
+                if value is not None:
+                    values.append(value)
+        if values:
+            return min(values)
+        for key in ("drval2", "depth_max", "maxdepth", "maximum_depth"):
+            if key in props:
+                value = _finite(props.get(key))
+                if value is not None:
+                    return value
+        return None
+
+    def depth_at(self, latitude: float, longitude: float) -> float | None:
+        values = [
+            value
+            for polygon in self.depth
+            if polygon.contains(latitude, longitude)
+            if (value := self._depth_value(polygon)) is not None
+        ]
+        return min(values) if values else None
+
+    def is_unsurveyed(self, latitude: float, longitude: float) -> bool:
+        return any(polygon.contains(latitude, longitude) for polygon in self.unsurveyed)
+
+    def point_is_safe(self, latitude: float, longitude: float) -> bool:
+        if self.is_land(latitude, longitude) or not self.is_covered(latitude, longitude):
+            return False
+        if self.is_unsurveyed(latitude, longitude):
+            return False
+        if self.minimum_depth_m is not None:
+            depth = self.depth_at(latitude, longitude)
+            if depth is None or depth < self.minimum_depth_m:
+                return False
+        return True
 
     def segment_is_water(
         self,
@@ -240,6 +285,37 @@ class EncConstraint:
             if self.is_land(lat, lon):
                 return False
         return True
+
+    def segment_is_safe(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        *,
+        sample_spacing_nm: float = 0.20,
+    ) -> bool:
+        if not self.segment_is_water(start, end, sample_spacing_nm=sample_spacing_nm):
+            return False
+        distance = haversine_nm(start[0], start[1], end[0], end[1])
+        samples = max(1, int(math.ceil(distance / max(0.1, sample_spacing_nm))))
+        for index in range(samples + 1):
+            ratio = index / samples
+            lat = start[0] + (end[0] - start[0]) * ratio
+            lon = start[1] + (end[1] - start[1]) * ratio
+            if not self.point_is_safe(lat, lon):
+                return False
+        return True
+
+    def path_is_safe(self, coordinates: Iterable[list[float] | tuple[float, float]]) -> bool:
+        values = list(coordinates)
+        if len(values) < 2:
+            return False
+        return all(
+            self.segment_is_safe(
+                (float(first[1]), float(first[0])),
+                (float(second[1]), float(second[0])),
+            )
+            for first, second in zip(values, values[1:])
+        )
 
     def path_is_water(self, coordinates: Iterable[list[float] | tuple[float, float]]) -> bool:
         values = list(coordinates)
@@ -316,6 +392,9 @@ class EncConstraint:
             "bands": list(self.bands),
             "land_polygons": len(self.land),
             "coverage_polygons": len(self.coverage),
+            "depth_polygons": len(self.depth),
+            "unsurveyed_polygons": len(self.unsurveyed),
+            "minimum_depth_m": self.minimum_depth_m,
             "query_bbox": [round(value, 5) for value in self.query_bbox],
             "fetched_at_utc": self.fetched_at_utc,
             "certified_navigation": False,
@@ -354,11 +433,13 @@ class EncGeometryClient:
             return self._metadata[service]
         payload = await self._json(f"{ENC_ROOT}/{service}/MapServer", {"f": "json"})
         layers = payload.get("layers") or []
-        land = next((item for item in layers if str(item.get("name") or "").endswith(".Land_Area")), None)
-        coverage = next((item for item in layers if str(item.get("name") or "").endswith(".Coverage_area")), None)
+        land = next((item for item in layers if str(item.get("name") or "").endswith(".Land_Area") and str(item.get("geometryType") or "").endswith("Polygon")), None)
+        coverage = next((item for item in layers if str(item.get("name") or "").endswith(".Coverage_area") and str(item.get("geometryType") or "").endswith("Polygon")), None)
+        depth = next((item for item in layers if str(item.get("name") or "").endswith(".Depth_Area") and str(item.get("geometryType") or "").endswith("Polygon")), None)
+        unsurveyed = next((item for item in layers if str(item.get("name") or "").endswith(".Unsurveyed_Area") and str(item.get("geometryType") or "").endswith("Polygon")), None)
         if not land or not coverage:
             raise EncGeometryError(f"NOAA ENC {service} is missing land/coverage layers")
-        result = {"land": int(land["id"]), "coverage": int(coverage["id"])}
+        result = {"land": int(land["id"]), "coverage": int(coverage["id"]), "depth": int(depth["id"]) if depth else None, "unsurveyed": int(unsurveyed["id"]) if unsurveyed else None}
         self._metadata[service] = result
         return result
 
@@ -415,10 +496,10 @@ class EncGeometryClient:
         return (max(-180.0, west), max(-89.0, south), min(180.0, east), min(89.0, north))
 
     async def async_prepare(
-        self, start: tuple[float, float], destination: tuple[float, float]
+        self, start: tuple[float, float], destination: tuple[float, float], *, minimum_depth_m: float | None = None
     ) -> EncConstraint:
         bbox = self._query_bbox(start, destination)
-        cache_key = ":".join(f"{round(value, 3):.3f}" for value in bbox)
+        cache_key = ":".join(f"{round(value, 3):.3f}" for value in bbox) + f":depth={round(minimum_depth_m or 0.0,2)}"
         now = datetime.now(timezone.utc)
         cached = self._cache.get(cache_key)
         if cached and now - cached[0] <= CACHE_TTL:
@@ -426,24 +507,40 @@ class EncGeometryClient:
 
         land: list[Polygon] = []
         coverage: list[Polygon] = []
+        depth: list[Polygon] = []
+        unsurveyed: list[Polygon] = []
         successful_bands: list[str] = []
         errors: list[str] = []
         for label, service in ENC_BANDS:
             try:
                 metadata = await self._band_metadata(service)
-                land_payload, coverage_payload = await asyncio.gather(
+                tasks = [
                     self._query_layer(service, metadata["land"], bbox),
                     self._query_layer(service, metadata["coverage"], bbox),
-                )
+                ]
+                if minimum_depth_m is not None and metadata.get("depth") is not None:
+                    tasks.append(self._query_layer(service, metadata["depth"], bbox))
+                if metadata.get("unsurveyed") is not None:
+                    tasks.append(self._query_layer(service, metadata["unsurveyed"], bbox))
+                payloads = await asyncio.gather(*tasks)
+                land_payload, coverage_payload = payloads[0], payloads[1]
+                cursor = 2
+                depth_payload = payloads[cursor] if minimum_depth_m is not None and metadata.get("depth") is not None else {"features": []}
+                cursor += int(minimum_depth_m is not None and metadata.get("depth") is not None)
+                unsurveyed_payload = payloads[cursor] if metadata.get("unsurveyed") is not None else {"features": []}
             except Exception as err:  # fail only after trying all bands
                 errors.append(f"{label}: {err}")
                 continue
             band_land = _geojson_polygons(land_payload, label)
             band_coverage = _geojson_polygons(coverage_payload, label)
+            band_depth = _geojson_polygons(depth_payload, label)
+            band_unsurveyed = _geojson_polygons(unsurveyed_payload, label)
             if band_coverage:
                 successful_bands.append(label)
                 land.extend(band_land)
                 coverage.extend(band_coverage)
+                depth.extend(band_depth)
+                unsurveyed.extend(band_unsurveyed)
 
         self.last_request = {
             "provider": "NOAA ENC Direct to GIS",
@@ -451,6 +548,9 @@ class EncGeometryClient:
             "bands": successful_bands,
             "land_polygons": len(land),
             "coverage_polygons": len(coverage),
+            "depth_polygons": len(depth),
+            "unsurveyed_polygons": len(unsurveyed),
+            "minimum_depth_m": minimum_depth_m,
             "at_utc": now.isoformat().replace("+00:00", "Z"),
         }
         if not coverage:
@@ -464,12 +564,20 @@ class EncGeometryClient:
             raise EncGeometryError(
                 "NOAA ENC coverage was found but land geometry could not be loaded; route generation stopped closed."
             )
+        if minimum_depth_m is not None and not depth:
+            self.last_error = "NOAA ENC returned no usable depth-area polygons for the requested corridor"
+            raise EncGeometryError(
+                "Depth-aware routing was requested from the vessel draft, but NOAA ENC depth-area geometry could not be established for this corridor."
+            )
         constraint = EncConstraint(
             land=land,
             coverage=coverage,
             bands=tuple(successful_bands),
             query_bbox=bbox,
             fetched_at_utc=now.isoformat().replace("+00:00", "Z"),
+            depth=depth,
+            unsurveyed=unsurveyed,
+            minimum_depth_m=minimum_depth_m,
         )
         # Both endpoints must be within some ENC coverage. Coastal endpoint
         # adjustment may resolve land classification, but lack of coverage is
@@ -502,7 +610,8 @@ def strict_validate_route(
     for index, (first, second) in enumerate(zip(coordinates, coordinates[1:])):
         start = (float(first[1]), float(first[0]))
         end = (float(second[1]), float(second[0]))
-        if not constraint.segment_is_water(start, end, sample_spacing_nm=0.1):
+        check = constraint.segment_is_safe if hasattr(constraint, "segment_is_safe") else constraint.segment_is_water
+        if not check(start, end, sample_spacing_nm=0.1):
             return {
                 "valid": False,
                 "reason": f"segment {index + 1} intersects ENC land geometry",

@@ -19,6 +19,7 @@ from _loader import (
     migration,
     parser,
     routing,
+    routing_engine,
     weather,
 )
 
@@ -286,7 +287,10 @@ class EncClientContractTests(unittest.IsolatedAsyncioTestCase):
 
         client._json = fake_json
         metadata = await client._band_metadata("enc_approach")
-        self.assertEqual({"land": 238, "coverage": 224}, metadata)
+        self.assertEqual(238, metadata["land"])
+        self.assertEqual(224, metadata["coverage"])
+        self.assertIn("depth", metadata)
+        self.assertIn("unsurveyed", metadata)
 
     async def test_arcgis_query_requests_geojson_geometry_without_assuming_objectid_name(self):
         client = coastline.EncGeometryClient(object())
@@ -1081,3 +1085,116 @@ class FrontendFeatureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutingEngineV3Tests(unittest.TestCase):
+    class ConstantEnvironment:
+        def __init__(self, wind_dir=0.0, wind_speed=14.0, current_speed=0.0, current_dir=0.0):
+            self.value = {
+                "wind_speed_kn": wind_speed,
+                "wind_dir_deg": wind_dir,
+                "wave_height_m": 0.5,
+                "wave_period_s": 8.0,
+                "current_speed_kn": current_speed,
+                "current_dir_deg": current_dir,
+            }
+        def at(self, latitude, longitude, valid_at_utc):
+            return dict(self.value)
+
+    @staticmethod
+    def rectangle(west, south, east, north, source="test", properties=None):
+        ring = [(west,south),(east,south),(east,north),(west,north),(west,south)]
+        return coastline.Polygon(ring, [], (west,south,east,north), source, properties or {})
+
+    def constraint(self, *, land=None, minimum_depth_m=None, shallow=None):
+        coverage = [self.rectangle(-2,-2,3,2,"coverage")]
+        depth = []
+        if minimum_depth_m is not None:
+            depth.append(self.rectangle(-2,-2,3,2,"deep",{"DRVAL1":30.0}))
+            if shallow:
+                depth.append(self.rectangle(*shallow,"shallow",{"DRVAL1":1.0}))
+        return coastline.EncConstraint(
+            land=land or [], coverage=coverage, bands=("test",),
+            query_bbox=(-2,-2,3,2), fetched_at_utc="2026-08-26T00:00:00Z",
+            depth=depth, unsurveyed=[], minimum_depth_m=minimum_depth_m,
+        )
+
+    def profile(self):
+        return routing.VesselProfile.from_mapping({
+            "hull_configuration":"monohull sailboat",
+            "observed_cruise_speed_kn":6.0,
+            "minimum_upwind_twa_deg":40.0,
+        })
+
+    def test_open_water_crosswind_can_be_nearly_direct(self):
+        result = routing_engine.route_passage(
+            (0.0,0.0),(0.0,0.5),"2026-08-26T00:00:00Z",
+            self.profile(), self.ConstantEnvironment(wind_dir=0), self.constraint(),
+            heading_step_deg=10, beam_width=48,
+        )
+        self.assertEqual("weather_routing_v3", result["method"])
+        self.assertLess(result["selected"]["distance_nm"], 32.5)
+        self.assertEqual(0, result["selected"]["no_go_violations"])
+
+    def test_direct_upwind_route_tacks(self):
+        # Destination north, wind from north: direct heading is forbidden.
+        result = routing_engine.route_passage(
+            (0.0,0.0),(0.45,0.0),"2026-08-26T00:00:00Z",
+            self.profile(), self.ConstantEnvironment(wind_dir=0), self.constraint(),
+            heading_step_deg=10, beam_width=64,
+        )
+        self.assertGreater(result["selected"]["distance_nm"], 27.0)
+        self.assertGreaterEqual(result["selected"]["maneuvers"], 1)
+
+    def test_thin_barrier_island_forces_detour(self):
+        barrier = self.rectangle(0.23,-0.16,0.27,0.16,"island")
+        constraint = self.constraint(land=[barrier])
+        result = routing_engine.route_passage(
+            (0.0,0.0),(0.0,0.5),"2026-08-26T00:00:00Z",
+            self.profile(), self.ConstantEnvironment(wind_dir=0), constraint,
+            heading_step_deg=10, beam_width=72,
+        )
+        coords=result["selected"]["coordinates"]
+        self.assertTrue(constraint.path_is_safe(coords))
+        self.assertGreater(result["selected"]["distance_nm"], 30.5)
+
+    def test_shallow_shortcut_is_bounded_and_deterministic(self):
+        constraint = self.constraint(minimum_depth_m=3.0, shallow=(0.20,-0.14,0.30,0.14))
+        outputs=[]
+        for _ in range(3):
+            result = routing_engine.route_passage(
+                (0.0,0.0),(0.0,0.5),"2026-08-26T00:00:00Z",
+                self.profile(), self.ConstantEnvironment(wind_dir=0), constraint,
+                heading_step_deg=10, beam_width=72,
+            )
+            self.assertTrue(constraint.path_is_safe(result["selected"]["coordinates"]))
+            self.assertLess(result["diagnostics"]["expanded"], 100000)
+            outputs.append(result["selected"]["coordinates"])
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[1], outputs[2])
+
+    def test_ordered_routing_gate_is_present_in_path(self):
+        gate=(0.18,0.24)
+        result = routing_engine.route_passage(
+            (0.0,0.0),(0.0,0.5),"2026-08-26T00:00:00Z",
+            self.profile(), self.ConstantEnvironment(wind_dir=0), self.constraint(), gates=[gate],
+            heading_step_deg=10, beam_width=64,
+        )
+        coords=result["selected"]["coordinates"]
+        self.assertIn([round(gate[1],6),round(gate[0],6)],coords)
+
+    def test_pol_text_parses_matrix(self):
+        rows=routing.parse_pol_text("0 6 10 14\n45 4.0 5.0 5.8\n90 5.0 6.2 7.0\n")
+        self.assertEqual(6, len(rows))
+        self.assertEqual(45.0, rows[0]["twa_deg"])
+        self.assertEqual(6.0, rows[0]["tws_kn"])
+
+    def test_passage_preview_token_includes_routing_gates(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            archive=database.SQLiteArchive(Path(temp)/"archive.sqlite3")
+            archive.initialize()
+            base=dict(passage_id=None,name="Gated",start_utc="2026-08-26T00:00:00Z",end_utc=None)
+            one=archive.preview_passage(**base,routing_gates=[{"latitude":0.1,"longitude":0.2}])
+            two=archive.preview_passage(**base,routing_gates=[{"latitude":0.2,"longitude":0.2}])
+            self.assertNotEqual(one["preview_token"],two["preview_token"])

@@ -1,5 +1,21 @@
 # BlueSky Passage changelog
 
+## 3.0.0 — 2026-08-26
+
+- Replaces the production v2 route search with a separate, deterministic Routing Engine v3 package that can run and be tested without Home Assistant.
+- Adds a true isochrone/beam search over many headings, hard sailing no-go rejection, maneuver penalties, vessel-polar/fallback performance, wave/comfort effects, and current vectors that distinguish heading from COG/SOG.
+- Fixes final-leg physics: exact destination closure now searches for a heading whose current-adjusted COG aligns with the destination instead of snapping a non-aligned heading to the endpoint.
+- Expands NOAA ENC safety to dynamically load `Depth_Area` and `Unsurveyed_Area` alongside `Land_Area` and `Coverage_area`. Draft plus configurable under-keel margin is enforced when available; unknown/shallow depth fails closed.
+- Retains an independent high-resolution post-search validator. Failed geography/depth/unsurveyed validation prevents route persistence.
+- Adds up to 12 ordered map-placed routing gates and includes them in passage preview tokens and route-context hashing.
+- Adds conventional `.pol` text import with bilinear interpolation while retaining legacy JSON polar points.
+- Replaces the v2 routing fingerprint with `weather-routing-v3-isochrone-enc-depth`, making all pre-v3 modeled routes intentionally stale.
+- Adds a provider-neutral environmental field. Xweather remains the live provider in 3.0.0, with denser bounded space/time sampling and explicit failure when usable wind is unavailable; no fake optimized reference is saved.
+- Adds deterministic Routing Engine v3 unit/acceptance scenarios plus `tools/run_routing_scenarios.py` for headless regression runs.
+- Fixes the v3 search termination discovered during release validation: after the first completed route, the engine now evaluates one additional generation and stops deterministically instead of continuing an unnecessary tail; heading expansion is destination-centered and bounded.
+- Makes archive SQLite connection lifetime explicit so transactional connections are always closed after each operation.
+- Retains the v2.5 routine-alert toggle/status, passage map coordinate picker, analytics, actual-vs-modeled card, and HACS workflow.
+
 ## 2.5.0 — 2026-08-25
 
 - Replaces the production coarse-raster route-validity layer after the first real-world route test exposed a land-crossing failure at the Outer Banks. The legacy 1.25-arc-minute raster remains bundled only for compatibility/regression tests and is no longer allowed to certify a scored route.

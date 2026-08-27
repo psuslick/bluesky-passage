@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from contextlib import contextmanager
 from typing import Any, Iterable
 
 from .calculations import destination_metrics, haversine_nm, parse_utc
@@ -38,10 +39,11 @@ def route_context_hash(
         "departure_latitude": passage.get("departure_latitude"),
         "departure_longitude": passage.get("departure_longitude"),
         "destination_version_id": passage.get("current_destination_version_id"),
+        "routing_gates": passage.get("routing_gates") or [],
         "profile_updated_at_utc": profile_updated_at_utc,
         # Routing semantics are part of the saved context. This intentionally
         # marks every pre-2.2 three-corridor result stale after upgrade.
-        "routing_engine": "enc-isochrone-v4",
+        "routing_engine": "weather-routing-v3-isochrone-enc-depth",
     }
     return hashlib.sha256(
         json.dumps(context, sort_keys=True, separators=(",", ":")).encode()
@@ -69,6 +71,16 @@ class SQLiteArchive:
         connection.execute("PRAGMA journal_size_limit = 8388608")
         return connection
 
+    @contextmanager
+    def _connection(self):
+        """Open one transactional archive connection and always close it."""
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     @staticmethod
     def _ensure_column(
         connection: sqlite3.Connection,
@@ -87,7 +99,7 @@ class SQLiteArchive:
     def initialize(self) -> None:
         """Create/migrate the archive and verify it opens cleanly."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA wal_autocheckpoint = 1000")
@@ -294,6 +306,7 @@ class SQLiteArchive:
             self._ensure_column(connection, "passages", "departure_name", "TEXT")
             self._ensure_column(connection, "passages", "departure_latitude", "REAL")
             self._ensure_column(connection, "passages", "departure_longitude", "REAL")
+            self._ensure_column(connection, "passages", "routing_gates_json", "TEXT")
             self._ensure_column(
                 connection,
                 "route_versions",
@@ -387,7 +400,7 @@ class SQLiteArchive:
         """Insert unseen records atomically and return an ingestion summary."""
         ordered = sorted(records, key=lambda record: record.recorded_at_utc)
         inserted_ids: list[int] = []
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if import_id is not None:
                 import_row = connection.execute(
@@ -505,7 +518,7 @@ class SQLiteArchive:
 
     def latest_point(self, source: str = "garmin_mapshare") -> dict[str, Any] | None:
         """Return the newest source point."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM track_points WHERE source=? "
                 "ORDER BY recorded_at_utc DESC, id DESC LIMIT 1",
@@ -514,7 +527,7 @@ class SQLiteArchive:
             return self._normalize_point(row)
 
     def point_by_id(self, point_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return self._normalize_point(
                 connection.execute(
                     "SELECT * FROM track_points WHERE id=?", (point_id,)
@@ -558,7 +571,7 @@ class SQLiteArchive:
             clauses.append("source=?")
             parameters.append(source)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM track_points" + where + " ORDER BY recorded_at_utc,id",
                 parameters,
@@ -705,7 +718,7 @@ class SQLiteArchive:
 
     def dashboard_state(self) -> dict[str, Any]:
         """Return lightweight tracking state independent of passage metadata."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             latest = self._normalize_point(
                 connection.execute(
                     "SELECT * FROM track_points WHERE source='garmin_mapshare' "
@@ -785,14 +798,25 @@ class SQLiteArchive:
         }
 
     def integrity_check(self) -> str:
-        with self._connect() as connection:
+        with self._connection() as connection:
             self._last_integrity = str(
                 connection.execute("PRAGMA quick_check").fetchone()[0]
             )
             return self._last_integrity
 
+    @staticmethod
+    def _normalize_passage_row(passage: dict[str, Any]) -> dict[str, Any]:
+        raw = passage.get("routing_gates_json")
+        try:
+            gates = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            gates = []
+        passage["routing_gates"] = gates if isinstance(gates, list) else []
+        passage.pop("routing_gates_json", None)
+        return passage
+
     def list_passages(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT p.*, dv.name AS destination_name, dv.latitude AS destination_latitude,
@@ -810,7 +834,7 @@ class SQLiteArchive:
                 ORDER BY COALESCE(p.started_at_utc,p.created_at_utc) DESC
                 """
             ).fetchall()
-            result = [dict(row) for row in rows]
+            result = [self._normalize_passage_row(dict(row)) for row in rows]
             for passage in result:
                 passage["range_mode"] = (
                     "specific_time" if passage.get("ended_at_utc") else "open_ended"
@@ -824,7 +848,7 @@ class SQLiteArchive:
         state, or preview archive coverage. A stale/corrupt supplemental route or an
         unrelated analytics failure must never make passage metadata uneditable.
         """
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT p.*, dv.name AS destination_name, dv.latitude AS destination_latitude,
@@ -839,7 +863,7 @@ class SQLiteArchive:
             ).fetchone()
             if row is None:
                 raise ValueError("Passage not found")
-            passage = dict(row)
+            passage = self._normalize_passage_row(dict(row))
             passage["destination_versions"] = [
                 dict(item)
                 for item in connection.execute(
@@ -863,7 +887,7 @@ class SQLiteArchive:
         if not passages:
             raise ValueError("Passage not found")
         passage = passages[0]
-        with self._connect() as connection:
+        with self._connection() as connection:
             passage["destination_versions"] = [
                 dict(row)
                 for row in connection.execute(
@@ -960,7 +984,7 @@ class SQLiteArchive:
 
     def list_destinations(self) -> list[dict[str, Any]]:
         """Return saved destination entries, newest first."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             return [
                 dict(row)
                 for row in connection.execute(
@@ -1027,6 +1051,7 @@ class SQLiteArchive:
         departure_latitude: float | None = None,
         departure_longitude: float | None = None,
         notes: str | None = None,
+        routing_gates: list[dict[str, Any]] | None = None,
         destination: dict[str, Any] | None = None,
         clear_destination: bool = False,
     ) -> dict[str, Any]:
@@ -1074,6 +1099,18 @@ class SQLiteArchive:
                 "effective_at_utc": effective,
                 "notes": str(destination.get("notes") or "").strip() or None,
             }
+        normalized_gates: list[dict[str, float]] = []
+        for index, gate in enumerate(routing_gates or []):
+            if not isinstance(gate, dict):
+                raise ValueError(f"Routing gate {index + 1} is invalid")
+            latitude = gate.get("latitude")
+            longitude = gate.get("longitude")
+            if latitude is None or longitude is None:
+                raise ValueError(f"Routing gate {index + 1} needs latitude and longitude")
+            self._validate_coordinates(float(latitude), float(longitude))
+            normalized_gates.append({"latitude": float(latitude), "longitude": float(longitude)})
+        if len(normalized_gates) > 12:
+            raise ValueError("A passage may contain at most 12 routing gates")
         payload = {
             "passage_id": int(passage_id) if passage_id is not None else None,
             "name": cleaned_name,
@@ -1087,6 +1124,7 @@ class SQLiteArchive:
             if departure_longitude is not None
             else None,
             "notes": str(notes or "").strip() or None,
+            "routing_gates": normalized_gates,
             "destination": normalized_destination,
             "clear_destination": bool(clear_destination),
         }
@@ -1095,7 +1133,7 @@ class SQLiteArchive:
         if end:
             clauses.append("recorded_at_utc<=?")
             parameters.append(end)
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT id,recorded_at_utc,latitude,longitude FROM track_points WHERE "
                 + " AND ".join(clauses)
@@ -1161,6 +1199,7 @@ class SQLiteArchive:
         departure_latitude: float | None = None,
         departure_longitude: float | None = None,
         notes: str | None = None,
+        routing_gates: list[dict[str, Any]] | None = None,
         destination: dict[str, Any] | None = None,
         clear_destination: bool = False,
     ) -> dict[str, Any]:
@@ -1174,6 +1213,7 @@ class SQLiteArchive:
             departure_latitude=departure_latitude,
             departure_longitude=departure_longitude,
             notes=notes,
+            routing_gates=routing_gates,
             destination=destination,
             clear_destination=clear_destination,
         )
@@ -1182,16 +1222,16 @@ class SQLiteArchive:
         value = preview["normalized"]
         changed_at = utc_now()
         status = "completed" if value["end_utc"] else "planned"
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if passage_id is None:
                 cursor = connection.execute(
                     """
                     INSERT INTO passages(
                         name,status,started_at_utc,ended_at_utc,departure_name,
-                        departure_latitude,departure_longitude,notes,
+                        departure_latitude,departure_longitude,notes,routing_gates_json,
                         created_at_utc,updated_at_utc
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         value["name"],
@@ -1202,6 +1242,7 @@ class SQLiteArchive:
                         value["departure_latitude"],
                         value["departure_longitude"],
                         value["notes"],
+                        json.dumps(value["routing_gates"], separators=(",", ":")),
                         changed_at,
                         changed_at,
                     ),
@@ -1218,7 +1259,7 @@ class SQLiteArchive:
                     """
                     UPDATE passages SET name=?,status=?,started_at_utc=?,ended_at_utc=?,
                         arrived_at_utc=NULL,departure_name=?,departure_latitude=?,
-                        departure_longitude=?,notes=?,updated_at_utc=? WHERE id=?
+                        departure_longitude=?,notes=?,routing_gates_json=?,updated_at_utc=? WHERE id=?
                     """,
                     (
                         value["name"],
@@ -1229,6 +1270,7 @@ class SQLiteArchive:
                         value["departure_latitude"],
                         value["departure_longitude"],
                         value["notes"],
+                        json.dumps(value["routing_gates"], separators=(",", ":")),
                         changed_at,
                         passage_id,
                     ),
@@ -1298,14 +1340,14 @@ class SQLiteArchive:
 
     def delete_passage(self, passage_id: int) -> None:
         """Delete passage metadata without deleting global track records."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute("DELETE FROM passages WHERE id=?", (passage_id,))
             if cursor.rowcount != 1:
                 raise ValueError("Passage not found")
 
     def begin_import(self, source: str, filename: str, content_sha256: str) -> int:
         now = utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT id,status FROM imports WHERE content_sha256=?", (content_sha256,)
             ).fetchone()
@@ -1329,7 +1371,7 @@ class SQLiteArchive:
 
     def finish_import(self, import_id: int, *, failed: bool = False, notes: str | None = None) -> dict[str, Any]:
         status = "failed" if failed else "completed"
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE imports SET status=?,notes=? WHERE id=? AND status='running'",
                 (status, notes, import_id),
@@ -1339,7 +1381,7 @@ class SQLiteArchive:
             return dict(connection.execute("SELECT * FROM imports WHERE id=?", (import_id,)).fetchone())
 
     def rollback_import(self, import_id: int) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             removed = connection.execute(
                 "DELETE FROM track_points WHERE import_id=?", (import_id,)
@@ -1356,7 +1398,7 @@ class SQLiteArchive:
             return result
 
     def list_imports(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return [
                 dict(row)
                 for row in connection.execute(
@@ -1371,7 +1413,7 @@ class SQLiteArchive:
         items = list(records)
         keys = [record.dedupe_key(source) for record in items]
         existing: set[str] = set()
-        with self._connect() as connection:
+        with self._connection() as connection:
             for start in range(0, len(keys), 500):
                 batch = keys[start : start + 500]
                 if not batch:
@@ -1417,7 +1459,7 @@ class SQLiteArchive:
         normalized_start = start.isoformat().replace("+00:00", "Z")
         normalized_end = end.isoformat().replace("+00:00", "Z")
         now = utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if phase == "commit":
                 preview = connection.execute(
@@ -1477,7 +1519,7 @@ class SQLiteArchive:
         return self.get_backfill_job(job_id)
 
     def get_backfill_job(self, job_id: int) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             job = _dict(
                 connection.execute(
                     "SELECT * FROM backfill_jobs WHERE id=?", (job_id,)
@@ -1495,7 +1537,7 @@ class SQLiteArchive:
             return job
 
     def list_backfill_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return [
                 dict(row)
                 for row in connection.execute(
@@ -1506,7 +1548,7 @@ class SQLiteArchive:
 
     def next_backfill_chunk(self, job_id: int) -> dict[str, Any] | None:
         """Claim the next chunk, resetting one interrupted running chunk."""
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             job = connection.execute(
                 "SELECT status FROM backfill_jobs WHERE id=?", (job_id,)
@@ -1557,7 +1599,7 @@ class SQLiteArchive:
         first_recorded_at_utc: str | None,
         last_recorded_at_utc: str | None,
     ) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -1612,7 +1654,7 @@ class SQLiteArchive:
 
     def fail_backfill_chunk(self, job_id: int, chunk_id: int, error: str) -> dict[str, Any]:
         message = str(error)[:1000]
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE backfill_chunks SET status='failed',error=? WHERE id=? AND job_id=?",
                 (message, chunk_id, job_id),
@@ -1624,7 +1666,7 @@ class SQLiteArchive:
         return self.get_backfill_job(job_id)
 
     def cancel_backfill_job(self, job_id: int) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             job = connection.execute(
                 "SELECT import_id FROM backfill_jobs WHERE id=?", (job_id,)
             ).fetchone()
@@ -1663,7 +1705,7 @@ class SQLiteArchive:
         items = list(samples)
         inserted = 0
         requested = utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for sample in items:
                 cursor = connection.execute(
@@ -1728,7 +1770,7 @@ class SQLiteArchive:
             clauses.append("valid_at_utc<=?")
             parameters.append(end_utc)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM weather_samples" + (where + " AND purpose='track'" if where else " WHERE purpose='track'") + " ORDER BY valid_at_utc,id",
                 parameters,
@@ -1763,7 +1805,7 @@ class SQLiteArchive:
             .isoformat()
             .replace("+00:00", "Z")
         )
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM weather_samples WHERE valid_at_utc BETWEEN ? AND ? "
                 "AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? "
@@ -1794,7 +1836,7 @@ class SQLiteArchive:
         return self._normalize_weather(row)
 
     def get_vessel_profile(self) -> dict[str, Any]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT profile_json,updated_at_utc FROM vessel_profiles WHERE id=1"
             ).fetchone()
@@ -1808,7 +1850,7 @@ class SQLiteArchive:
     def save_vessel_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
         serialized = json.dumps(profile, sort_keys=True, separators=(",", ":"))
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "INSERT INTO vessel_profiles(id,profile_json,updated_at_utc) VALUES(1,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET profile_json=excluded.profile_json," 
@@ -1839,7 +1881,7 @@ class SQLiteArchive:
             self._validate_coordinates(latitude, longitude)
             normalized.append([longitude, latitude])
         now = utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             if not connection.execute("SELECT 1 FROM passages WHERE id=?", (passage_id,)).fetchone():
                 raise ValueError("Passage not found")
             try:
@@ -1877,7 +1919,7 @@ class SQLiteArchive:
             )
 
     def current_route(self, passage_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM route_versions WHERE passage_id=? "
                 "ORDER BY imported_at_utc DESC,id DESC LIMIT 1",

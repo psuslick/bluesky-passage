@@ -1,13 +1,27 @@
 # BlueSky Passage
 
 [![HACS custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/docs/faq/custom_repositories/)
-[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/psuslick/bluesky-passage/releases)
 
-BlueSky Passage 2.5.0 is a Home Assistant custom integration and responsive
+BlueSky Passage 3.0.0 is a Home Assistant custom integration and responsive
 sidebar panel for continuously archiving Garmin MapShare positions and analyzing
 passages. It combines a non-purging local source archive, editable passage
 annotations, linked maps/charts, optional Xweather wind/marine data, an
 on-demand PredictWind view, and a water-constrained sailing-analysis engine.
+
+## What changed in 3.0.0
+
+Version 3.0.0 replaces the production v2 routing search with a separate, Home-Assistant-agnostic **Routing Engine v3**. The engine uses deterministic isochrone/beam expansion across many physically sail-able headings, hard no-go rejection, vessel polar interpolation, wave/comfort penalties, and vector current addition so heading and course over ground are modeled separately. Exact route closure now solves for a current-compensated heading rather than snapping an arbitrary heading to the destination.
+
+The environmental model is provider-neutral inside the router. This release continues to obtain wind/wave/current samples through the configured Xweather adapter, but builds a denser bounded space/time field around an ENC-valid sampling spine. Missing weather fails closed; the system no longer saves a geometric reference as though it were an optimized route.
+
+NOAA ENC Direct to GIS safety is expanded from land/coverage screening to **Land_Area, Coverage_area, Depth_Area, and Unsurveyed_Area**. When vessel draft is known, the router applies draft plus a configurable under-keel margin and rejects unknown/shallow depth during safety validation. Every generated route receives a separate, denser final validation pass before it can be saved.
+
+Passages can now contain up to 12 ordered **routing gates**. Add them from the passage map; every optimized route must pass through the gates in order. The vessel profile accepts a conventional TWA-by-TWS `.pol` table in addition to the legacy JSON point table, with bilinear interpolation for rectangular polar grids.
+
+A headless deterministic scenario runner (`tools/run_routing_scenarios.py`) and Routing Engine v3 acceptance tests cover open-water crosswind, direct-upwind tacking, thin barrier islands, shallow shortcuts, currents, missing weather, and ordered routing gates. All pre-v3 modeled routes are intentionally marked stale by the new `weather-routing-v3-isochrone-enc-depth` fingerprint.
+
+The v2.5 routine-alert switch/status, passage map pin editor, map pan/zoom, analytics charts, and actual-vs-modeled card remain included.
 
 ## What changed in 2.5.0
 
@@ -124,7 +138,7 @@ one custom integration.
 1. Create a full Home Assistant backup.
 2. In **HACS**, add `https://github.com/psuslick/bluesky-passage` as a custom
    **Integration** if it is not already installed.
-3. Open **BlueSky Passage** in HACS and install/update to version **2.5.0**.
+3. Open **BlueSky Passage** in HACS and install/update to version **3.0.0**.
 4. Restart Home Assistant; a browser reload alone is not sufficient.
 5. Hard-refresh the browser or reset the Companion App frontend cache if the old
    panel remains visible.
@@ -434,7 +448,7 @@ preview and verify Garmin actually exposes older records.
 
 ### Map will not pan
 
-Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 2.5.0.
+Version 2.3 supports drag panning, arrow-button panning, reliable +/− zoom, pointer-centered mouse-wheel/trackpad zoom, double-click zoom, and two-finger pinch zoom. If the map still behaves like an older version after upgrade, hard-refresh the browser or reset the Companion App frontend cache and confirm the footer reports 3.0.0.
 
 ### Basemap blank but overlays appear
 

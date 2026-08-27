@@ -125,6 +125,14 @@ async def ws_refresh(hass, connection, msg) -> None:
         connection.send_result(msg["id"], await runtime.async_state())
 
 
+ROUTING_GATE_SCHEMA = vol.Schema(
+    {
+        vol.Required("latitude"): vol.All(vol.Coerce(float), vol.Range(min=-90, max=90)),
+        vol.Required("longitude"): vol.All(vol.Coerce(float), vol.Range(min=-180, max=180)),
+    }
+)
+
+
 DESTINATION_SCHEMA = vol.Schema(
     {
         vol.Required("name"): vol.All(str, vol.Length(min=1, max=100)),
@@ -152,6 +160,7 @@ PASSAGE_FIELDS = {
         None, vol.All(vol.Coerce(float), vol.Range(min=-180, max=180))
     ),
     vol.Optional("notes"): vol.All(str, vol.Length(max=5000)),
+    vol.Optional("routing_gates", default=[]): vol.All([ROUTING_GATE_SCHEMA], vol.Length(max=12)),
     vol.Optional("destination"): vol.Any(None, DESTINATION_SCHEMA),
     vol.Optional("clear_destination", default=False): bool,
 }
@@ -167,6 +176,7 @@ def _passage_arguments(msg: dict[str, Any]) -> dict[str, Any]:
         "departure_latitude": msg.get("departure_latitude"),
         "departure_longitude": msg.get("departure_longitude"),
         "notes": msg.get("notes"),
+        "routing_gates": msg.get("routing_gates") or [],
         "destination": msg.get("destination"),
         "clear_destination": msg.get("clear_destination", False),
     }

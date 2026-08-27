@@ -22,7 +22,7 @@ from .calculations import haversine_nm, initial_bearing_true, parse_utc
 from .land import is_land as legacy_is_land, mask_metadata, path_is_water as legacy_path_is_water, segment_is_water as legacy_segment_is_water
 
 EARTH_RADIUS_NM = 3440.065
-ROUTING_ENGINE_VERSION = "enc-isochrone-v4"
+ROUTING_ENGINE_VERSION = "weather-routing-v3-isochrone-enc-depth"
 
 
 
@@ -273,6 +273,49 @@ def shortest_water_path(
     )
 
 
+def parse_pol_text(value: str | None) -> list[dict[str, float]]:
+    """Parse common matrix-style .pol text into normalized polar points.
+
+    Expected shape is a header containing TWS values followed by one row per
+    TWA. Separators may be whitespace, comma, semicolon, or tab. Comment and
+    blank lines are ignored.
+    """
+    if not value or not str(value).strip():
+        return []
+    rows = []
+    for raw in str(value).splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", "//", ";")):
+            continue
+        parts = [item for item in __import__("re").split(r"[\s,;]+", line) if item]
+        numbers = []
+        for item in parts:
+            try:
+                numbers.append(float(item))
+            except ValueError:
+                numbers.append(None)
+        rows.append(numbers)
+    if len(rows) < 2:
+        raise ValueError("Polar text needs a wind-speed header and at least one TWA row")
+    header = [item for item in rows[0] if item is not None]
+    if len(header) < 2:
+        raise ValueError("Polar header needs at least one true-wind-speed column")
+    # Most .pol files start header with 0/TWA. Treat all but first as TWS.
+    tws_values = header[1:]
+    result: list[dict[str, float]] = []
+    for row in rows[1:]:
+        values = [item for item in row if item is not None]
+        if len(values) < 2:
+            continue
+        twa = abs(values[0])
+        for tws, speed in zip(tws_values, values[1:]):
+            if tws >= 0 and speed > 0:
+                result.append({"twa_deg": min(180.0, twa), "tws_kn": tws, "boat_speed_kn": speed})
+    if not result:
+        raise ValueError("Polar text did not contain any positive boat-speed cells")
+    return result
+
+
 @dataclass(slots=True)
 class VesselProfile:
     """Partial vessel-performance profile with explicit fallbacks."""
@@ -289,12 +332,17 @@ class VesselProfile:
     observed_cruise_speed_kn: float | None = None
     max_comfortable_wave_m: float | None = None
     minimum_upwind_twa_deg: float | None = None
+    under_keel_clearance_ft: float | None = None
     polar_table: tuple[dict[str, float], ...] = ()
+    polar_text: str | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "VesselProfile":
         data = value or {}
         polar: list[dict[str, float]] = []
+        polar_text = str(data.get("polar_text") or "").strip() or None
+        if polar_text:
+            polar.extend(parse_pol_text(polar_text))
         for item in data.get("polar_table") or []:
             if not isinstance(item, dict):
                 continue
@@ -323,7 +371,9 @@ class VesselProfile:
             observed_cruise_speed_kn=_finite(data.get("observed_cruise_speed_kn")),
             max_comfortable_wave_m=_finite(data.get("max_comfortable_wave_m")),
             minimum_upwind_twa_deg=_finite(data.get("minimum_upwind_twa_deg")),
+            under_keel_clearance_ft=_finite(data.get("under_keel_clearance_ft")),
             polar_table=tuple(polar),
+            polar_text=polar_text,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -340,7 +390,9 @@ class VesselProfile:
             "observed_cruise_speed_kn": self.observed_cruise_speed_kn,
             "max_comfortable_wave_m": self.max_comfortable_wave_m,
             "minimum_upwind_twa_deg": self.minimum_upwind_twa_deg,
+            "under_keel_clearance_ft": self.under_keel_clearance_ft,
             "polar_table": [dict(item) for item in self.polar_table],
+            "polar_text": self.polar_text,
         }
 
     @property
@@ -366,6 +418,13 @@ class VesselProfile:
         if waterline and waterline > 0:
             return _clamp(1.34 * math.sqrt(waterline), 3.0, 12.0)
         return 5.5
+
+    @property
+    def minimum_depth_m(self) -> float | None:
+        if self.draft_ft is None or self.draft_ft <= 0:
+            return None
+        margin_ft = self.under_keel_clearance_ft if self.under_keel_clearance_ft is not None else 3.0
+        return max(0.0, (self.draft_ft + max(0.0, margin_ft)) * 0.3048)
 
     @property
     def completeness(self) -> dict[str, Any]:

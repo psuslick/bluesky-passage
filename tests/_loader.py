@@ -38,6 +38,8 @@ migration = load("migration")
 garmin_dates = load("garmin_dates")
 land = load("land")
 routing = load("routing")
+import importlib
+routing_engine = importlib.import_module(f"{PACKAGE}.routing_engine.engine")
 
 # weather.py is mostly pure normalization logic but imports two Home Assistant
 # helpers for its runtime HTTP client. Tiny stand-ins keep regression tests

@@ -54,10 +54,12 @@ from .database import route_context_hash
 from .coastline import EncGeometryClient, EncGeometryError, strict_validate_route
 from .routing import (
     VesselProfile,
-    optimize_sailing_route,
+    WeatherField,
     route_weather_sample_requests,
     shortest_water_path,
+    path_distance,
 )
+from .routing_engine import RoutingEngineError, route_passage
 from .weather import (
     WeatherAuthenticationError,
     WeatherError,
@@ -897,11 +899,15 @@ class BlueSkyRuntime:
             },
         }
 
-        # Routing Engine v2 fails closed unless high-resolution NOAA ENC vector
-        # geometry can be prepared for the corridor. The old coarse raster is no
-        # longer permitted to certify a scored route.
+        profile_data = await self.archive.async_get_vessel_profile()
+        profile = VesselProfile.from_mapping(profile_data["profile"])
+        # Routing Engine v3 fails closed unless NOAA ENC vector geometry can be
+        # prepared. When draft is known, depth areas are also loaded and checked
+        # against draft plus the configured under-keel clearance.
         try:
-            constraint = await self.coastline_client.async_prepare(start, destination)
+            constraint = await self.coastline_client.async_prepare(
+                start, destination, minimum_depth_m=profile.minimum_depth_m
+            )
         except EncGeometryError as err:
             raise ValueError(str(err)) from err
 
@@ -949,14 +955,30 @@ class BlueSkyRuntime:
                 "The saved destination pin was not changed."
             )
 
-        profile_data = await self.archive.async_get_vessel_profile()
-        profile = VesselProfile.from_mapping(profile_data["profile"])
-        # v2.5: the direct geodesic is reference-only. Build an ENC-valid
-        # geometric baseline first, then search many sailing headings through a
-        # bounded Xweather field. Invalid land/no-go segments never receive a
-        # score.
-        baseline = shortest_water_path(start, destination, constraint=constraint)
-        request_metadata = route_weather_sample_requests(baseline, departure, profile, constraint=constraint)
+        gates = [
+            (float(item["latitude"]), float(item["longitude"]))
+            for item in (detail.get("routing_gates") or [])
+            if item.get("latitude") is not None and item.get("longitude") is not None
+        ]
+        for index, gate in enumerate(gates):
+            if not constraint.point_is_safe(*gate):
+                raise ValueError(
+                    f"Routing gate {index + 1} is not inside modeled safe water/depth coverage. Move the gate and retry."
+                )
+
+        # Build a land-valid reference through every mandatory gate. It is used
+        # only to bound/schedule environmental sampling, never as a scored route.
+        reference_targets = [*gates, destination]
+        baseline: list[list[float]] = [[start[1], start[0]]]
+        leg_start = start
+        for leg_destination in reference_targets:
+            leg = shortest_water_path(leg_start, leg_destination, constraint=constraint)
+            baseline.extend(leg[1:])
+            leg_start = leg_destination
+
+        request_metadata = route_weather_sample_requests(
+            baseline, departure, profile, constraint=constraint
+        )
         request_metadata = [
             {
                 **item,
@@ -966,30 +988,53 @@ class BlueSkyRuntime:
             }
             for item in request_metadata
         ]
-        warnings: list[str] = []
-        samples: list[dict[str, Any]] = []
-        if self.weather_client.configured:
-            fetched = await self._weather_for_requests(request_metadata)
-            for sample in fetched:
-                if sample.get("conditions_available") or sample.get("maritime_available"):
-                    samples.append(sample)
-                else:
-                    warnings.extend(sample.get("warnings") or [])
-        else:
-            warnings.append(
-                "Xweather is not configured; using an ENC-valid geometric reference without sailing-weather optimization"
+        if not self.weather_client.configured:
+            raise ValueError(
+                "Routing Engine v3 requires a usable weather field. Configure Xweather before calculating a modeled sailing route."
             )
-        summary = optimize_sailing_route(
-            start, destination, departure, profile, baseline, samples, constraint=constraint
-        )
+        fetched = await self._weather_for_requests(request_metadata)
+        warnings = sorted({warning for sample in fetched for warning in (sample.get("warnings") or [])})
+        samples = [
+            sample for sample in fetched
+            if sample.get("conditions_available") or sample.get("maritime_available")
+        ]
+        field = WeatherField(samples)
+        if not field.available or (not profile.is_motor_only and not field.wind_available):
+            raise ValueError(
+                "No usable wind field was available for this departure time. BlueSky did not save a geometric fallback as an ideal route."
+            )
+        try:
+            summary = route_passage(
+                start, destination, departure, profile, field, constraint, gates=gates
+            )
+        except RoutingEngineError as err:
+            raise ValueError(str(err)) from err
+
         summary["endpoint_adjustments"] = endpoint_adjustments
         summary["endpoint_notes"] = endpoint_warnings
-        validation = strict_validate_route(constraint, summary["selected"].get("coordinates") or [])
+        summary["reference"] = {
+            "label": "Direct geodesic reference",
+            "coordinates": [[requested_start[1], requested_start[0]], [requested_destination[1], requested_destination[0]]],
+            "distance_nm": round(haversine_nm(*requested_start, *requested_destination), 2),
+            "water_valid": constraint.segment_is_water(requested_start, requested_destination),
+            "scored_candidate": False,
+        }
+        summary["baseline"] = {
+            "label": "ENC-valid reference through routing gates",
+            "coordinates": baseline,
+            "distance_nm": round(path_distance(baseline), 2),
+            "scored_candidate": False,
+        }
+        summary["geography"] = constraint.metadata()
+        summary["weather_sample_count"] = len(samples)
+        validation = strict_validate_route(
+            constraint, summary["selected"].get("coordinates") or []
+        )
         summary["final_validation"] = validation
         if not validation.get("valid"):
             raise ValueError(
-                "The generated route failed independent NOAA ENC validation: "
-                + str(validation.get("reason") or "unknown geometry failure")
+                "The generated route failed independent NOAA ENC/depth validation: "
+                + str(validation.get("reason") or "unknown safety failure")
             )
         summary["actual"] = await self._actual_route_analysis(
             detail, summary["selected"], departure
@@ -1015,7 +1060,7 @@ class BlueSkyRuntime:
         ).hexdigest()
         return await self.archive.async_add_route_version(
             passage_id,
-            "Sailing weather search" if summary["method"] == "xweather_sailing_search" else "Water-valid reference",
+            "Routing Engine v3 sailing route",
             summary["method"],
             digest,
             selected["coordinates"],
